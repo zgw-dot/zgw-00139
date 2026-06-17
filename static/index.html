@@ -98,6 +98,8 @@
                                 <option value="rejected">已驳回</option>
                                 <option value="revoked">已撤销</option>
                             </select>
+                            <input type="file" id="task-import-file" accept=".json" style="display:none" onchange="importTaskFile(event)">
+                            <button onclick="document.getElementById('task-import-file').click()">📥 导入方案</button>
                             <button class="btn-primary" onclick="showCreateTaskModal()">+ 新建任务</button>
                         </div>
                     </div>

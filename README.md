@@ -94,6 +94,51 @@ curl -X POST http://localhost:5000/api/templates/import \
   -d '{"name":"96孔标准板","rows":8,"cols":12,"conflict_mode":"overwrite","wells":[...]}'
 ```
 
+#### 步骤1.8：任务复跑（复制 / 导出方案 / 导入方案）
+
+同一套板位和配液参数想再做一批时，无需从头新建，可使用任务复跑功能：
+
+| 操作 | 说明 |
+|------|------|
+| **复制成新草稿** | `POST /api/tasks/<id>/copy` ，将现有任务复制为新草稿。复制内容：模板、总体积、孔位分配、已选引物/试剂。**不复制**：审批状态、库存扣减、历史记录。 |
+| **导出方案 JSON** | `GET /api/tasks/<id>/export/json` ，下载完整任务方案 JSON，含 schema_version、task、template、wells、reagent_usage、primer_usage。 |
+| **导入方案** | `POST /api/tasks/import` ，从 JSON 文件导入任务方案，导入后状态为 **草稿**，可重新生成、批准、撤销。 |
+
+**可复制的任务状态**：草稿 (draft)、待复核 (pending_review)、已批准 (approved) 均可复制；已驳回 (rejected)、已撤销 (revoked) 不可复制。
+
+**导入冲突拦截**（全量校验，失败无脏数据）：
+
+| 校验项 | 失败响应 | 说明 |
+|--------|----------|------|
+| 模板不存在 | HTTP 400 | 导入的模板 ID 在当前库中不存在 |
+| 模板尺寸不匹配 | HTTP 400 | 模板存在但行数/列数与导入数据不符 |
+| 试剂不存在 | HTTP 400 | 导入引用的试剂在当前库中不存在 |
+| 引物不存在 | HTTP 400 | 导入引用的引物在当前库中不存在 |
+| 任务重名 | HTTP 409 | 任务名称已存在，响应含 `conflict=name_exists` + `existing_id` |
+
+**任务重名冲突处理**：通过 `conflict_mode` 参数控制（任务导入仅支持 reject 和 rename）：
+
+| conflict_mode | HTTP | 行为 |
+|---------------|------|------|
+| `reject` (默认) | **409** | 拒绝导入，提示重名 |
+| `rename` | **201** | 自动追加 `_2` / `_3` … 递增后缀，新建独立任务 |
+
+示例：
+
+```bash
+# 复制任务为新草稿
+curl -X POST http://localhost:5000/api/tasks/1/copy \
+  -H "Content-Type: application/json" \
+  -d '{"name": "我的任务_副本"}'
+
+# 导出任务方案 JSON
+curl -o task_plan.json http://localhost:5000/api/tasks/1/export/json
+
+# 导入任务方案（重命名模式处理重名）
+curl -X POST http://localhost:5000/api/tasks/import?conflict_mode=rename \
+  -F "file=@task_plan.json"
+```
+
 #### 步骤2：创建任务
 
 打开 **"任务管理"** 标签页：
@@ -142,7 +187,7 @@ curl -X POST http://localhost:5000/api/templates/import \
 
 ### 验证命令
 
-运行完整测试套件（26 个测试用例）：
+运行完整测试套件（32 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell

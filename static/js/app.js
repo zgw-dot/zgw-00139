@@ -295,14 +295,20 @@ async function loadTasks() {
         };
         
         listEl.innerHTML = data.map(t => `
-            <div class="task-card status-${t.status}" onclick="showTaskDetail(${t.id})">
-                <h3>${t.name}</h3>
-                <div class="task-meta">
-                    <span class="task-status status-${t.status}">${statusLabels[t.status] || t.status}</span>
-                    <span>总体系: ${t.total_volume} ${t.volume_unit}</span>
-                    <span>创建时间: ${t.created_at}</span>
+            <div class="task-card status-${t.status}">
+                <div onclick="showTaskDetail(${t.id})">
+                    <h3>${t.name}</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-${t.status}">${statusLabels[t.status] || t.status}</span>
+                        <span>总体系: ${t.total_volume} ${t.volume_unit}</span>
+                        <span>创建时间: ${t.created_at}</span>
+                    </div>
+                    ${t.deviation_note ? `<div style="margin-top:8px;color:#ffc107;font-size:13px;">📝 有偏差备注</div>` : ''}
                 </div>
-                ${t.deviation_note ? `<div style="margin-top:8px;color:#ffc107;font-size:13px;">📝 有偏差备注</div>` : ''}
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(${t.id})" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(${t.id})" title="导出方案 JSON">📤 导出</button>
+                </div>
             </div>
         `).join('');
     } catch (e) {
@@ -342,6 +348,8 @@ async function showTaskDetail(taskId) {
         if (data.task.status === 'draft' || data.task.status === 'rejected') {
             html += '<button onclick="generatePlan()">🔬 生成方案</button>';
         }
+        html += '<button onclick="copyCurrentTask()">📋 复制任务</button>';
+        html += '<button onclick="exportTaskPlan(currentTaskId)">📤 导出方案</button>';
         html += '<button onclick="exportReport()">📊 导出报告</button>';
         html += '</div>';
         
@@ -838,3 +846,93 @@ window.onclick = function(event) {
         closeModal();
     }
 };
+
+async function copyTask(taskId) {
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${taskId}/copy`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast('任务复制成功，已创建新草稿', 'success');
+            loadTasks();
+            loadStats();
+            loadHistory();
+        } else {
+            showToast('复制失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('复制失败: ' + e.message, 'error');
+    }
+}
+
+function copyCurrentTask() {
+    if (currentTaskId) {
+        copyTask(currentTaskId);
+    }
+}
+
+function exportTaskPlan(taskId) {
+    window.open(`${API_BASE}/tasks/${taskId}/export/json`);
+}
+
+async function importTaskFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    event.target.value = '';
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch(`${API_BASE}/tasks/import`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast('任务方案导入成功', 'success');
+            loadTasks();
+            loadStats();
+            loadHistory();
+        } else {
+            if (data.conflict === 'name_exists') {
+                const rename = confirm(
+                    `任务名称已存在: ${file.name.replace('.json', '')}\n\n` +
+                    '是否自动重命名导入？\n' +
+                    '点击"确定"自动重命名，点击"取消"放弃导入。'
+                );
+                if (rename) {
+                    const formData2 = new FormData();
+                    formData2.append('file', file);
+                    
+                    const resp2 = await fetch(`${API_BASE}/tasks/import?conflict_mode=rename`, {
+                        method: 'POST',
+                        body: formData2
+                    });
+                    const data2 = await resp2.json();
+                    
+                    if (resp2.ok) {
+                        showToast('任务方案已重命名导入', 'success');
+                        loadTasks();
+                        loadStats();
+                        loadHistory();
+                    } else {
+                        showToast('导入失败: ' + data2.error, 'error');
+                    }
+                }
+            } else {
+                showToast('导入失败: ' + data.error, 'error');
+            }
+        }
+    } catch (e) {
+        showToast('导入失败: ' + e.message, 'error');
+    }
+}

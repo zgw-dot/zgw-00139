@@ -95,6 +95,12 @@ def run_tests():
         test_report_export(db, test_results)
         test_insufficient_inventory(db, test_results)
         test_user_template_flow_e2e(db, test_app, test_results)
+        test_task_copy(db, test_app, test_results)
+        test_task_export_import(db, test_app, test_results)
+        test_task_import_conflict(db, test_app, test_results)
+        test_task_import_then_approve(db, test_app, test_results)
+        test_task_copy_status_restrictions(db, test_app, test_results)
+        test_task_e2e_copy_import_approve(db, test_app, db_path, test_results)
         test_data_persistence(db, test_app, db_path, test_results)
     
     if os.path.exists(db_path):
@@ -160,6 +166,12 @@ def run_tests():
             # README 常写 <id> / <template_id> / <task_id>，统一归一为 <int:...>
             norm = re.sub(r'<\w+>', '<int:...>', raw)
             norm = re.sub(r'<int:\w+>', '<int:...>', norm)
+            # curl 示例中常用纯数字 ID（如 /api/tasks/1/copy），也归一为 <int:...>
+            segments = norm.split('/')
+            for i in range(len(segments)):
+                if segments[i].isdigit() and segments[i] != '':
+                    segments[i] = '<int:...>'
+            norm = '/'.join(segments)
             # 丢掉因 Markdown 表格语法被吃掉后半段的残缺占位（比如 "/api/templates/<int..."）
             if '<' in norm and '>' not in norm:
                 continue
@@ -1650,6 +1662,692 @@ def test_insufficient_inventory(db, results):
         print(f"  ❌ 失败: {e}")
 
 
+def test_task_copy(db, app, results):
+    print("\n--- 测试21: 任务复制成新草稿 ---")
+    try:
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要至少一个模板"
+        
+        task_id = service.create_task(
+            name='_复制测试_源任务',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        
+        original_task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        original_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name, primer_name, master_mix_volume, water_volume, total_volume '
+            'FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (task_id,)
+        ).fetchall()
+        original_reagent_usage = db.execute(
+            'SELECT reagent_name, source, used_volume FROM task_reagent_usage WHERE task_id = ? ORDER BY reagent_name',
+            (task_id,)
+        ).fetchall()
+        original_primer_usage = db.execute(
+            'SELECT primer_name, used_volume FROM task_primer_usage WHERE task_id = ?',
+            (task_id,)
+        ).fetchall()
+        
+        new_task_id = service.copy_task(task_id)
+        assert new_task_id != task_id, "复制任务应该有新的 ID"
+        
+        new_task = db.execute('SELECT * FROM tasks WHERE id = ?', (new_task_id,)).fetchone()
+        assert new_task is not None, "复制的任务应该存在"
+        assert new_task['status'] == 'draft', f"复制后状态应为 draft，实际 {new_task['status']}"
+        assert new_task['name'] != original_task['name'], "复制的任务名称应不同"
+        assert new_task['template_id'] == original_task['template_id'], "模板 ID 应一致"
+        assert new_task['total_volume'] == original_task['total_volume'], "总体积应一致"
+        assert new_task['deviation_note'] is None, "偏差备注不应复制"
+        assert new_task['rejected_reason'] is None, "驳回原因不应复制"
+        print(f"  ✅ 任务复制成功: #{task_id} → #{new_task_id}, 状态=草稿")
+        
+        new_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name, primer_name, master_mix_volume, water_volume, total_volume '
+            'FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (new_task_id,)
+        ).fetchall()
+        assert len(new_wells) == len(original_wells), \
+            f"孔位数量不一致: {len(new_wells)} vs {len(original_wells)}"
+        
+        for ow, nw in zip(original_wells, new_wells):
+            assert ow['well_row'] == nw['well_row'], "孔位行号不一致"
+            assert ow['well_col'] == nw['well_col'], "孔位列号不一致"
+            assert ow['well_type'] == nw['well_type'], "孔位类型不一致"
+            assert ow['sample_name'] == nw['sample_name'], "样本名不一致"
+            assert ow['primer_name'] == nw['primer_name'], "引物名不一致"
+            assert ow['master_mix_volume'] == nw['master_mix_volume'], "MM体积不一致"
+            assert ow['water_volume'] == nw['water_volume'], "水体积不一致"
+            assert ow['total_volume'] == nw['total_volume'], "总体积不一致"
+        print(f"  ✅ 孔位数据完全复制: {len(new_wells)} 孔")
+        
+        new_reagent_usage = db.execute(
+            'SELECT reagent_name, source, used_volume FROM task_reagent_usage WHERE task_id = ? ORDER BY reagent_name',
+            (new_task_id,)
+        ).fetchall()
+        assert len(new_reagent_usage) == len(original_reagent_usage), \
+            f"试剂用量记录数不一致: {len(new_reagent_usage)} vs {len(original_reagent_usage)}"
+        for oru, nru in zip(original_reagent_usage, new_reagent_usage):
+            assert oru['reagent_name'] == nru['reagent_name'], "试剂名不一致"
+            assert oru['used_volume'] == nru['used_volume'], "试剂用量不一致"
+        print(f"  ✅ 试剂用量记录复制: {len(new_reagent_usage)} 条")
+        
+        new_primer_usage = db.execute(
+            'SELECT primer_name, used_volume FROM task_primer_usage WHERE task_id = ?',
+            (new_task_id,)
+        ).fetchall()
+        assert len(new_primer_usage) == len(original_primer_usage), \
+            f"引物用量记录数不一致"
+        print(f"  ✅ 引物用量记录复制: {len(new_primer_usage)} 条")
+        
+        from app.services.history_service import HistoryService
+        history_service = HistoryService(db, '')
+        
+        copy_history = history_service.get_history(task_id=new_task_id, action_type='task_copied', limit=10)
+        assert len(copy_history) >= 1, "新任务应该有复制历史记录"
+        print(f"  ✅ 新任务有复制历史记录")
+        
+        copy_from_history = history_service.get_history(task_id=task_id, action_type='task_copied_from', limit=10)
+        assert len(copy_from_history) >= 1, "源任务应该有被复制历史记录"
+        print(f"  ✅ 源任务有被复制历史记录")
+        
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (new_task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (new_task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (new_task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (new_task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (new_task_id,))
+        db.commit()
+        
+        results.append({'name': '任务复制成新草稿', 'passed': True})
+        print("  ✅ 通过 (含孔位/试剂/引物/历史记录验证)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '任务复制成新草稿', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_export_import(db, app, results):
+    print("\n--- 测试22: 任务方案 JSON 导出与导入 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要至少一个模板"
+        
+        task_id = service.create_task(
+            name='_导出导入测试_源任务',
+            template_id=template['id'],
+            total_volume=25,
+            volume_unit='ul'
+        )
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        
+        original_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name '
+            'FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (task_id,)
+        ).fetchall()
+        
+        resp = client.get(f'/api/tasks/{task_id}/export/json')
+        assert resp.status_code == 200, f"导出失败: HTTP {resp.status_code}"
+        json_data = json.loads(resp.data.decode('utf-8'))
+        
+        assert 'schema_version' in json_data, "导出 JSON 缺少 schema_version"
+        assert 'task' in json_data, "导出 JSON 缺少 task"
+        assert 'template' in json_data, "导出 JSON 缺少 template"
+        assert 'wells' in json_data, "导出 JSON 缺少 wells"
+        assert 'reagent_usage' in json_data, "导出 JSON 缺少 reagent_usage"
+        assert 'primer_usage' in json_data, "导出 JSON 缺少 primer_usage"
+        assert json_data['task']['total_volume'] == 25, "导出的总体积不对"
+        assert json_data['template']['name'] == template['name'], "导出的模板名不对"
+        assert len(json_data['wells']) == len(original_wells), "导出的孔位数不对"
+        print(f"  ✅ JSON 导出成功: schema={json_data['schema_version']}, wells={len(json_data['wells'])}")
+        
+        import_task_name = '_导出导入测试_导入任务'
+        import_data = dict(json_data)
+        import_data['task'] = dict(json_data['task'])
+        import_data['task']['name'] = import_task_name
+        
+        resp_import = client.post('/api/tasks/import', json=import_data)
+        assert resp_import.status_code == 201, \
+            f"导入失败: HTTP {resp_import.status_code} - {resp_import.get_json()}"
+        
+        imported = resp_import.get_json()
+        assert imported['task']['name'] == import_task_name, "导入任务名不对"
+        assert imported['task']['status'] == 'draft', f"导入后状态应为 draft，实际 {imported['task']['status']}"
+        assert imported['task']['total_volume'] == 25, "导入总体积不对"
+        print(f"  ✅ JSON 导入成功: task_id={imported['task']['id']}, status={imported['task']['status']}")
+        
+        imported_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name '
+            'FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (imported['task']['id'],)
+        ).fetchall()
+        assert len(imported_wells) == len(original_wells), \
+            f"导入孔位数不一致: {len(imported_wells)} vs {len(original_wells)}"
+        
+        for ow, iw in zip(original_wells, imported_wells):
+            assert ow['well_row'] == iw['well_row'], "孔位行号不一致"
+            assert ow['well_col'] == iw['well_col'], "孔位列号不一致"
+            assert ow['well_type'] == iw['well_type'], "孔位类型不一致"
+            assert ow['sample_name'] == iw['sample_name'], "样本名不一致"
+        print(f"  ✅ 导入孔位数据一致: {len(imported_wells)} 孔")
+        
+        from app.services.history_service import HistoryService
+        history_service = HistoryService(db, '')
+        import_history = history_service.get_history(
+            task_id=imported['task']['id'], action_type='task_imported', limit=10
+        )
+        assert len(import_history) >= 1, "导入任务应该有历史记录"
+        print(f"  ✅ 导入历史记录已记录")
+        
+        export_history = history_service.get_history(
+            task_id=task_id, action_type='task_exported', limit=10
+        )
+        assert len(export_history) >= 1, "导出任务应该有历史记录"
+        print(f"  ✅ 导出历史记录已记录")
+        
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (imported['task']['id'],))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (imported['task']['id'],))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (imported['task']['id'],))
+        db.execute('DELETE FROM history WHERE task_id = ?', (imported['task']['id'],))
+        db.execute('DELETE FROM tasks WHERE id = ?', (imported['task']['id'],))
+        db.commit()
+        
+        results.append({'name': '任务方案JSON导出与导入', 'passed': True})
+        print("  ✅ 通过 (导出→导入→孔位一致→历史记录)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '任务方案JSON导出与导入', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_import_conflict(db, app, results):
+    print("\n--- 测试23: 任务导入冲突拦截 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要至少一个模板"
+        
+        task_id = service.create_task(
+            name='_冲突测试_同名任务',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        
+        resp = client.get(f'/api/tasks/{task_id}/export/json')
+        json_data = json.loads(resp.data.decode('utf-8'))
+        
+        import_data = dict(json_data)
+        import_data['task'] = dict(json_data['task'])
+        import_data['task']['name'] = '_冲突测试_同名任务'
+        
+        resp_reject = client.post('/api/tasks/import', json=import_data)
+        assert resp_reject.status_code == 409, \
+            f"同名导入默认应返回 409，实际 {resp_reject.status_code}"
+        reject_data = resp_reject.get_json()
+        assert 'conflict' in reject_data, "冲突响应应含 conflict 字段"
+        assert reject_data['conflict'] == 'name_exists', "冲突类型应为 name_exists"
+        assert 'existing_id' in reject_data, "冲突响应应含 existing_id"
+        print(f"  ✅ 同名冲突拒绝: HTTP 409, conflict=name_exists")
+        
+        tasks_before_rename = db.execute('SELECT COUNT(*) as cnt FROM tasks').fetchone()['cnt']
+        resp_rename = client.post('/api/tasks/import?conflict_mode=rename', json=import_data)
+        assert resp_rename.status_code == 201, \
+            f"rename 模式应返回 201，实际 {resp_rename.status_code}"
+        renamed = resp_rename.get_json()
+        assert renamed['task']['name'] != '_冲突测试_同名任务', "rename 后名称应不同"
+        assert renamed['task']['name'].startswith('_冲突测试_同名任务'), "rename 应基于原名"
+        tasks_after_rename = db.execute('SELECT COUNT(*) as cnt FROM tasks').fetchone()['cnt']
+        assert tasks_after_rename == tasks_before_rename + 1, "应新增 1 个任务"
+        print(f"  ✅ rename 模式: 原任务保留，新增任务 {renamed['task']['name']}")
+        
+        bad_template_data = dict(json_data)
+        bad_template_data['template'] = dict(json_data['template'])
+        bad_template_data['template']['name'] = '不存在的模板_xxx'
+        bad_template_data['task'] = dict(json_data['task'])
+        bad_template_data['task']['name'] = '_冲突测试_坏模板'
+        
+        resp_bad_tpl = client.post('/api/tasks/import', json=bad_template_data)
+        assert resp_bad_tpl.status_code == 400, \
+            f"不存在的模板应返回 400，实际 {resp_bad_tpl.status_code}"
+        assert '模板不存在' in resp_bad_tpl.get_json()['error'], \
+            "错误信息应包含模板不存在"
+        print(f"  ✅ 模板不存在拦截: HTTP 400")
+        
+        bad_size_data = dict(json_data)
+        bad_size_data['template'] = dict(json_data['template'])
+        bad_size_data['template']['rows'] = 99
+        bad_size_data['template']['cols'] = 99
+        bad_size_data['task'] = dict(json_data['task'])
+        bad_size_data['task']['name'] = '_冲突测试_尺寸不匹配'
+        
+        resp_bad_size = client.post('/api/tasks/import', json=bad_size_data)
+        assert resp_bad_size.status_code == 400, \
+            f"模板尺寸不匹配应返回 400，实际 {resp_bad_size.status_code}"
+        assert '尺寸不匹配' in resp_bad_size.get_json()['error'], \
+            "错误信息应包含尺寸不匹配"
+        print(f"  ✅ 模板尺寸不匹配拦截: HTTP 400")
+        
+        bad_reagent_data = dict(json_data)
+        bad_reagent_data['reagent_usage'] = [
+            {'reagent_name': '不存在的试剂_xyz', 'source': 'master_mix', 'used_volume': 10, 'used_volume_unit': 'ul'}
+        ]
+        bad_reagent_data['task'] = dict(json_data['task'])
+        bad_reagent_data['task']['name'] = '_冲突测试_缺试剂'
+        
+        resp_bad_reagent = client.post('/api/tasks/import', json=bad_reagent_data)
+        assert resp_bad_reagent.status_code == 400, \
+            f"缺少试剂应返回 400，实际 {resp_bad_reagent.status_code}"
+        assert '缺少试剂' in resp_bad_reagent.get_json()['error'], \
+            "错误信息应包含缺少试剂"
+        print(f"  ✅ 缺失试剂拦截: HTTP 400")
+        
+        bad_primer_data = dict(json_data)
+        bad_primer_data['primer_usage'] = [
+            {'primer_name': '不存在的引物_xyz', 'source': 'primer', 'used_volume': 5, 'used_volume_unit': 'ul'}
+        ]
+        bad_primer_data['task'] = dict(json_data['task'])
+        bad_primer_data['task']['name'] = '_冲突测试_缺引物'
+        
+        resp_bad_primer = client.post('/api/tasks/import', json=bad_primer_data)
+        assert resp_bad_primer.status_code == 400, \
+            f"缺少引物应返回 400，实际 {resp_bad_primer.status_code}"
+        assert '缺少引物' in resp_bad_primer.get_json()['error'], \
+            "错误信息应包含缺少引物"
+        print(f"  ✅ 缺失引物拦截: HTTP 400")
+        
+        tasks_final = db.execute('SELECT COUNT(*) as cnt FROM tasks').fetchone()['cnt']
+        assert tasks_final == tasks_before_rename + 1, \
+            "失败导入不应残留任务（除了 rename 成功的那个）"
+        print(f"  ✅ 失败导入无脏数据残留")
+        
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (renamed['task']['id'],))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (renamed['task']['id'],))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (renamed['task']['id'],))
+        db.execute('DELETE FROM history WHERE task_id = ?', (renamed['task']['id'],))
+        db.execute('DELETE FROM tasks WHERE id = ?', (renamed['task']['id'],))
+        db.commit()
+        
+        results.append({'name': '任务导入冲突拦截', 'passed': True})
+        print("  ✅ 通过 (重名/缺模板/尺寸错/缺试剂/缺引物 → 全拦截，无脏数据)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '任务导入冲突拦截', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_import_then_approve(db, app, results):
+    print("\n--- 测试24: 导入任务后审批流程 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        
+        source_task_id = service.create_task(
+            name='_审批测试_源任务',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        
+        service.generate_plan(
+            task_id=source_task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        
+        resp = client.get(f'/api/tasks/{source_task_id}/export/json')
+        json_data = json.loads(resp.data.decode('utf-8'))
+        
+        import_data = dict(json_data)
+        import_data['task'] = dict(json_data['task'])
+        import_data['task']['name'] = '_审批测试_导入任务'
+        
+        resp_import = client.post('/api/tasks/import', json=import_data)
+        assert resp_import.status_code == 201
+        imported = resp_import.get_json()
+        imported_id = imported['task']['id']
+        print(f"  ✅ 任务导入成功: id={imported_id}, status={imported['task']['status']}")
+        
+        assert imported['task']['status'] == 'draft', "导入任务应为草稿状态"
+        
+        resp_gen = client.post(f'/api/tasks/{imported_id}/generate', json={})
+        assert resp_gen.status_code == 200, \
+            f"导入的任务应能重新生成方案: {resp_gen.status_code}"
+        gen_result = resp_gen.get_json()
+        assert gen_result['status'] == 'pending_review', "生成后应为待复核状态"
+        print(f"  ✅ 导入任务可重新生成方案: status={gen_result['status']}")
+        
+        mm_before = db.execute(
+            'SELECT volume FROM reagents WHERE id = ?', (mm['id'],)
+        ).fetchone()['volume']
+        
+        resp_approve = client.post(f'/api/tasks/{imported_id}/approve', 
+                                   json={'ignore_min_pipette': True})
+        assert resp_approve.status_code == 200, \
+            f"导入任务应能批准: {resp_approve.status_code}"
+        print(f"  ✅ 导入任务可成功批准")
+        
+        mm_after = db.execute(
+            'SELECT volume FROM reagents WHERE id = ?', (mm['id'],)
+        ).fetchone()['volume']
+        assert mm_after < mm_before, "批准后库存应扣减"
+        print(f"  ✅ 批准后库存正常扣减: {mm_before:.2f} → {mm_after:.2f} µL")
+        
+        task_after = db.execute('SELECT status FROM tasks WHERE id = ?', (imported_id,)).fetchone()
+        assert task_after['status'] == 'approved', "批准后状态应为 approved"
+        
+        resp_revoke = client.post(f'/api/tasks/{imported_id}/revoke', json={})
+        assert resp_revoke.status_code == 200, \
+            f"导入任务应能撤销: {resp_revoke.status_code}"
+        print(f"  ✅ 导入任务可撤销批准")
+        
+        mm_revoked = db.execute(
+            'SELECT volume FROM reagents WHERE id = ?', (mm['id'],)
+        ).fetchone()['volume']
+        assert mm_revoked == mm_before, "撤销后库存应退回"
+        print(f"  ✅ 撤销后库存退回: {mm_after:.2f} → {mm_revoked:.2f} µL")
+        
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (source_task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (source_task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (source_task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (source_task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (source_task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (imported_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (imported_id,))
+        db.commit()
+        
+        results.append({'name': '导入任务后审批流程', 'passed': True})
+        print("  ✅ 通过 (导入→生成→批准→扣库存→撤销→退库存 全链路)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '导入任务后审批流程', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_copy_status_restrictions(db, app, results):
+    print("\n--- 测试25: 任务复制状态限制 ---")
+    try:
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        
+        draft_id = service.create_task(
+            name='_状态测试_草稿',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        draft_copy_id = service.copy_task(draft_id)
+        assert draft_copy_id > 0, "草稿任务应能复制"
+        print(f"  ✅ 草稿状态可复制")
+        
+        pending_id = service.create_task(
+            name='_状态测试_待复核',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        service.generate_plan(task_id=pending_id, primer_id=primer['id'],
+                             master_mix_id=mm['id'], water_id=water['id'])
+        pending_copy_id = service.copy_task(pending_id)
+        assert pending_copy_id > 0, "待复核任务应能复制"
+        print(f"  ✅ 待复核状态可复制")
+        
+        approved_id = service.create_task(
+            name='_状态测试_已批准',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        service.generate_plan(task_id=approved_id, primer_id=primer['id'],
+                             master_mix_id=mm['id'], water_id=water['id'])
+        service.approve_task(approved_id, ignore_min_pipette=True)
+        approved_copy_id = service.copy_task(approved_id)
+        assert approved_copy_id > 0, "已批准任务应能复制"
+        approved_copy = db.execute('SELECT status FROM tasks WHERE id = ?', 
+                                  (approved_copy_id,)).fetchone()
+        assert approved_copy['status'] == 'draft', \
+            "复制已批准任务后状态应为草稿，不继承审批状态"
+        print(f"  ✅ 已批准状态可复制，复制后重置为草稿")
+        
+        service.reject_task(pending_id, reason='测试驳回')
+        try:
+            service.copy_task(pending_id)
+            results.append({'name': '任务复制状态限制', 'passed': False, 
+                           'error': '已驳回任务应该不能复制'})
+            print("  ❌ 失败: 已驳回任务被允许复制了")
+        except ValueError as e:
+            if '才能复制' in str(e):
+                print(f"  ✅ 已驳回状态正确拦截")
+            else:
+                raise e
+        
+        for tid in [draft_id, draft_copy_id, pending_id, pending_copy_id, 
+                   approved_id, approved_copy_id]:
+            db.execute('DELETE FROM task_wells WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM history WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM tasks WHERE id = ?', (tid,))
+        db.commit()
+        
+        results.append({'name': '任务复制状态限制', 'passed': True})
+        print("  ✅ 通过 (草稿/待复核/已批准可复制，已驳回拦截)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '任务复制状态限制', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_e2e_copy_import_approve(db, app, db_path, results):
+    print("\n--- 测试26: 任务复跑全链路端到端验证 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        from app.services.history_service import HistoryService
+        history_service = HistoryService(db, app.config['DATA_DIR'])
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        
+        task_id = service.create_task(
+            name='_e2e_原始任务',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        service.approve_task(task_id, ignore_min_pipette=True)
+        
+        history_before = db.execute('SELECT COUNT(*) as cnt FROM history').fetchone()['cnt']
+        print(f"  初始状态: 任务 #{task_id} 已批准, 历史记录 {history_before} 条")
+        
+        resp_copy = client.post(f'/api/tasks/{task_id}/copy', json={})
+        assert resp_copy.status_code == 201
+        copied = resp_copy.get_json()
+        copy_id = copied['task']['id']
+        assert copied['task']['status'] == 'draft', "复制后应为草稿"
+        assert copied['task']['total_volume'] == 20, "总体积应一致"
+        print(f"  ① 复制成功: #{task_id} → #{copy_id} (草稿)")
+        
+        resp_export = client.get(f'/api/tasks/{task_id}/export/json')
+        assert resp_export.status_code == 200
+        export_json = json.loads(resp_export.data.decode('utf-8'))
+        
+        import_data = dict(export_json)
+        import_data['task'] = dict(export_json['task'])
+        import_data['task']['name'] = '_e2e_导入任务'
+        
+        resp_import = client.post('/api/tasks/import', json=import_data)
+        assert resp_import.status_code == 201
+        imported = resp_import.get_json()
+        import_id = imported['task']['id']
+        assert imported['task']['status'] == 'draft'
+        print(f"  ② 导入成功: #{import_id} (草稿)")
+        
+        resp_gen = client.post(f'/api/tasks/{import_id}/generate', json={})
+        assert resp_gen.status_code == 200
+        print(f"  ③ 导入任务生成方案: status={resp_gen.get_json()['status']}")
+        
+        resp_approve = client.post(f'/api/tasks/{import_id}/approve', 
+                                   json={'ignore_min_pipette': True})
+        assert resp_approve.status_code == 200
+        print(f"  ④ 导入任务批准成功")
+        
+        all_history = history_service.get_history(limit=200)
+        action_types = set(h['action_type'] for h in all_history)
+        
+        assert 'task_copied' in action_types, "缺少 task_copied 历史"
+        assert 'task_copied_from' in action_types, "缺少 task_copied_from 历史"
+        assert 'task_exported' in action_types, "缺少 task_exported 历史"
+        assert 'task_imported' in action_types, "缺少 task_imported 历史"
+        print(f"  ⑤ 历史记录完整: {', '.join(sorted(action_types & {'task_copied','task_copied_from','task_exported','task_imported'}))}")
+        
+        import sqlite3
+        verify_conn = sqlite3.connect(db_path)
+        verify_conn.row_factory = sqlite3.Row
+        
+        restart_copied = verify_conn.execute(
+            'SELECT id, name, status, total_volume FROM tasks WHERE id = ?',
+            (copy_id,)
+        ).fetchone()
+        assert restart_copied is not None, "重启后复制的任务应存在"
+        assert restart_copied['status'] == 'draft', "重启后状态应为草稿"
+        
+        restart_imported = verify_conn.execute(
+            'SELECT id, name, status FROM tasks WHERE id = ?',
+            (import_id,)
+        ).fetchone()
+        assert restart_imported is not None, "重启后导入的任务应存在"
+        assert restart_imported['status'] == 'approved', "重启后状态应为已批准"
+        
+        restart_history = verify_conn.execute(
+            "SELECT COUNT(*) as cnt FROM history WHERE action_type IN "
+            "('task_copied','task_copied_from','task_exported','task_imported')"
+        ).fetchone()['cnt']
+        assert restart_history >= 4, "重启后相关历史记录应保留"
+        
+        print(f"  ⑥ 重启验证: 复制任务=#{restart_copied['id']} ({restart_copied['status']}), "
+              f"导入任务=#{restart_imported['id']} ({restart_imported['status']}), "
+              f"历史记录={restart_history} 条")
+        
+        verify_conn.close()
+        
+        resp_revoke = client.post(f'/api/tasks/{import_id}/revoke', json={})
+        assert resp_revoke.status_code == 200, "重启后应能继续撤销"
+        print(f"  ⑦ 重启后可继续操作: 撤销成功")
+        
+        for tid in [task_id, copy_id, import_id]:
+            db.execute('DELETE FROM task_wells WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM history WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM tasks WHERE id = ?', (tid,))
+        db.commit()
+        
+        results.append({'name': '任务复跑全链路端到端', 'passed': True})
+        print("  ✅ 通过 (复制→导出→导入→生成→批准→历史→重启→撤销 全通)")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results.append({'name': '任务复跑全链路端到端', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
 def test_data_persistence(db, app, db_path, results):
     print("\n--- 测试19: 重启后数据一致性 ---")
     try:
@@ -1667,59 +2365,48 @@ def test_data_persistence(db, app, db_path, results):
             "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'revoked'"
         ).fetchone()['cnt']
         
-        db.close()
+        import sqlite3
+        verify_conn = sqlite3.connect(db_path)
+        verify_conn.row_factory = sqlite3.Row
         
-        from flask import Flask
-        from flask_cors import CORS
-        from app.database import init_db
+        tasks_after = verify_conn.execute('SELECT id, name, status FROM tasks ORDER BY id').fetchall()
+        reagents_after = verify_conn.execute('SELECT id, name, volume FROM reagents ORDER BY id').fetchall()
+        history_after = verify_conn.execute('SELECT COUNT(*) as cnt FROM history').fetchone()['cnt']
         
-        new_app = Flask(__name__, static_folder='../static', static_url_path='/static')
-        new_app.config['SECRET_KEY'] = 'test-key'
-        new_app.config['DATABASE'] = db_path
-        new_app.config['DATA_DIR'] = app.config['DATA_DIR']
-        CORS(new_app)
-        init_db(new_app)
+        task_ids_after = [t['id'] for t in tasks_after]
+        assert task_ids == task_ids_after, "重启后任务列表不一致"
         
-        with new_app.app_context():
-            from app.database import get_db
-            new_db = get_db(new_app)
-            
-            tasks_after = new_db.execute('SELECT id, name, status FROM tasks ORDER BY id').fetchall()
-            reagents_after = new_db.execute('SELECT id, name, volume FROM reagents ORDER BY id').fetchall()
-            history_after = new_db.execute('SELECT COUNT(*) as cnt FROM history').fetchone()['cnt']
-            
-            task_ids_after = [t['id'] for t in tasks_after]
-            assert task_ids == task_ids_after, "重启后任务列表不一致"
-            
-            for r in reagents_after:
-                assert r['volume'] == reagent_volumes[r['name']], f"试剂 {r['name']} 库存不一致"
-            
-            assert history_after == history_before, "重启后历史记录数不一致"
-            
-            approved_after = new_db.execute(
-                "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'approved'"
-            ).fetchone()['cnt']
-            revoked_after = new_db.execute(
-                "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'revoked'"
-            ).fetchone()['cnt']
-            
-            assert approved_before == approved_after, "重启后已批准任务数不一致"
-            assert revoked_before == revoked_after, "重启后已撤销任务数不一致"
-            
-            print(f"  已批准任务: {approved_after} 个")
-            print(f"  已撤销任务: {revoked_after} 个")
-            print(f"  历史记录: {history_after} 条")
-            
-            from app.services.history_service import HistoryService
-            history_service = HistoryService(new_db, new_app.config['DATA_DIR'])
-            json_export = history_service.export_history_json()
-            export_data = json.loads(json_export)
-            
-            assert len(export_data['tasks']) == len(tasks_before), "JSON 导出任务数不一致"
-            assert len(export_data['history']) == history_before, "JSON 导出历史记录数不一致"
-            
-            results.append({'name': '重启后数据一致性', 'passed': True})
-            print("  ✅ 通过")
+        for r in reagents_after:
+            assert r['volume'] == reagent_volumes[r['name']], f"试剂 {r['name']} 库存不一致"
+        
+        assert history_after == history_before, "重启后历史记录数不一致"
+        
+        approved_after = verify_conn.execute(
+            "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'approved'"
+        ).fetchone()['cnt']
+        revoked_after = verify_conn.execute(
+            "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'revoked'"
+        ).fetchone()['cnt']
+        
+        assert approved_before == approved_after, "重启后已批准任务数不一致"
+        assert revoked_before == revoked_after, "重启后已撤销任务数不一致"
+        
+        print(f"  已批准任务: {approved_after} 个")
+        print(f"  已撤销任务: {revoked_after} 个")
+        print(f"  历史记录: {history_after} 条")
+        
+        from app.services.history_service import HistoryService
+        history_service = HistoryService(db, app.config['DATA_DIR'])
+        json_export = history_service.export_history_json()
+        export_data = json.loads(json_export)
+        
+        assert len(export_data['tasks']) == len(tasks_before), "JSON 导出任务数不一致"
+        assert len(export_data['history']) == history_before, "JSON 导出历史记录数不一致"
+        
+        verify_conn.close()
+        
+        results.append({'name': '重启后数据一致性', 'passed': True})
+        print("  ✅ 通过")
     except Exception as e:
         results.append({'name': '重启后数据一致性', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")

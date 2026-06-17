@@ -712,3 +712,43 @@ header h1 {
 .legend-positive { background: #d4edda; border-color: #28a745; }
 .legend-negative { background: #f8d7da; border-color: #dc3545; }
 .legend-empty { background: #f8f9fa; border-color: #dee2e6; }
+
+.task-card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #f0f0f0;
+}
+
+.task-card-actions .btn-small {
+    padding: 6px 12px;
+    font-size: 12px;
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: #555;
+}
+
+.task-card-actions .btn-small:hover {
+    border-color: #667eea;
+    color: #667eea;
+    background: #f8f9ff;
+}
+
+.task-filters button {
+    padding: 8px 16px;
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.task-filters button:hover {
+    border-color: #667eea;
+    color: #667eea;
+}
