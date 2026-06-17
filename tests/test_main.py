@@ -76,6 +76,11 @@ def run_tests():
         test_import_reagents(db, test_results)
         test_import_template(db, test_results)
         test_template_migration_and_lifecycle(db, db_path, test_results)
+        test_template_export_and_reimport(db, test_app, test_results)
+        test_template_copy(db, test_app, test_results)
+        test_template_import_conflict(db, test_app, test_results)
+        test_template_delete_protection(db, test_app, test_results)
+        test_template_history_records(db, test_results)
         test_well_conflict(db, test_results)
         test_invalid_unit_interception(db, test_app, test_results)
         test_create_tasks(db, test_results)
@@ -513,6 +518,415 @@ def test_template_migration_and_lifecycle(db, db_path, results):
         err_detail = str(e) or type(e).__name__
         results.append({'name': '模板迁移&生命周期回归', 'passed': False, 'error': err_detail})
         print(f"  ❌ 失败: {err_detail}")
+
+
+def test_template_export_and_reimport(db, app, results):
+    print("\n--- 测试5c: 模板导出与重新导入 ---")
+    try:
+        client = app.test_client()
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要有至少一个模板"
+        tpl_id = template['id']
+        original_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (tpl_id,)
+        ).fetchall()
+        original_count = len(original_wells)
+
+        resp_json = client.get(f'/api/templates/{tpl_id}/export/json')
+        assert resp_json.status_code == 200, f"JSON导出失败: {resp_json.status_code}"
+        json_data = json.loads(resp_json.data.decode('utf-8'))
+        assert 'name' in json_data, "导出JSON缺少name"
+        assert 'wells' in json_data, "导出JSON缺少wells"
+        assert len(json_data['wells']) == original_count, \
+            f"导出孔位数不匹配: {len(json_data['wells'])} vs {original_count}"
+        print(f"  ✅ JSON导出: {json_data['name']}, {len(json_data['wells'])} 孔")
+
+        resp_csv = client.get(f'/api/templates/{tpl_id}/export/csv')
+        assert resp_csv.status_code == 200, f"CSV导出失败: {resp_csv.status_code}"
+        csv_content = resp_csv.data.decode('utf-8-sig')
+        assert len(csv_content) > 0, "CSV导出为空"
+        csv_lines = csv_content.strip().split('\n')
+        assert len(csv_lines) >= 2, "CSV至少有表头和一行数据"
+        print(f"  ✅ CSV导出: {len(csv_lines)} 行")
+
+        reimport_name = f'{template["name"]}_导出重导入测试'
+        resp_reimport = client.post('/api/templates/import', json={
+            'name': reimport_name,
+            'description': json_data.get('description', ''),
+            'rows': json_data['rows'],
+            'cols': json_data['cols'],
+            'wells': json_data['wells'],
+        })
+        assert resp_reimport.status_code == 201, f"重新导入失败: {resp_reimport.status_code} {resp_reimport.get_json()}"
+        reimported = resp_reimport.get_json()
+        assert reimported['name'] == reimport_name, f"重导入名称不匹配: {reimported['name']}"
+        assert len(reimported['wells']) == original_count, \
+            f"重导入孔位数不匹配: {len(reimported['wells'])} vs {original_count}"
+
+        reimport_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (reimported['id'],)
+        ).fetchall()
+        assert len(reimport_wells) == original_count, \
+            f"数据库孔位数不匹配: {len(reimport_wells)} vs {original_count}"
+
+        for ow, rw in zip(original_wells, reimport_wells):
+            assert ow['well_type'] == rw['well_type'], \
+                f"孔位类型不匹配: ({ow['well_row']},{ow['well_col']}) {ow['well_type']} vs {rw['well_type']}"
+            assert ow['sample_name'] == rw['sample_name'], \
+                f"样本名不匹配: ({ow['well_row']},{ow['well_col']}) {ow['sample_name']} vs {rw['sample_name']}"
+        print(f"  ✅ 重新导入: {reimported['name']}, {len(reimported['wells'])} 孔，内容一致")
+
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (reimported['id'],))
+        db.execute('DELETE FROM plate_templates WHERE id = ?', (reimported['id'],))
+        db.commit()
+
+        csv_reimport_name = f'{template["name"]}_CSV重导入测试'
+        import io as _io
+        csv_bytes = resp_csv.data
+        resp_csv_reimport = client.post('/api/templates/import',
+            data={'name': csv_reimport_name, 'description': 'CSV重导入',
+                  'file': (_io.BytesIO(csv_bytes), 'test_template.csv',
+                           'text/csv')})
+        assert resp_csv_reimport.status_code == 201, \
+            f"CSV重新导入失败: {resp_csv_reimport.status_code} {resp_csv_reimport.get_json()}"
+        csv_reimported = resp_csv_reimport.get_json()
+        assert len(csv_reimported['wells']) > 0, "CSV重导入孔位为空"
+        print(f"  ✅ CSV重导入: {csv_reimported['name']}, {len(csv_reimported['wells'])} 孔")
+
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (csv_reimported['id'],))
+        db.execute('DELETE FROM plate_templates WHERE id = ?', (csv_reimported['id'],))
+        db.commit()
+
+        results.append({'name': '模板导出与重新导入', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        results.append({'name': '模板导出与重新导入', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_template_copy(db, app, results):
+    print("\n--- 测试5d: 模板复制 ---")
+    try:
+        client = app.test_client()
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要有至少一个模板"
+        tpl_id = template['id']
+        original_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (tpl_id,)
+        ).fetchall()
+
+        resp = client.post(f'/api/templates/{tpl_id}/copy', json={})
+        assert resp.status_code == 201, f"复制失败: {resp.status_code} {resp.get_json()}"
+        copied = resp.get_json()
+        assert copied['name'] != template['name'], "复制品名称不应与原件相同"
+        assert copied['rows'] == template['rows'], "行数不匹配"
+        assert copied['cols'] == template['cols'], "列数不匹配"
+        print(f"  ✅ 复制成功: {template['name']} → {copied['name']}")
+
+        copied_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (copied['id'],)
+        ).fetchall()
+        assert len(copied_wells) == len(original_wells), \
+            f"孔位数不匹配: {len(copied_wells)} vs {len(original_wells)}"
+        for ow, cw in zip(original_wells, copied_wells):
+            assert ow['well_type'] == cw['well_type'], \
+                f"孔位类型不匹配: {ow['well_type']} vs {cw['well_type']}"
+            assert ow['sample_name'] == cw['sample_name'], \
+                f"样本名不匹配: {ow['sample_name']} vs {cw['sample_name']}"
+        print(f"  ✅ 复制品内容一致: {len(copied_wells)} 孔")
+
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        copied_task_id = service.create_task(
+            name='_copy_test_task',
+            template_id=copied['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        if primer and mm and water:
+            plan = service.generate_plan(
+                task_id=copied_task_id,
+                primer_id=primer['id'],
+                master_mix_id=mm['id'],
+                water_id=water['id']
+            )
+            assert plan['status'] == 'pending_review', f"生成方案状态不对: {plan['status']}"
+            print(f"  ✅ 复制品创建任务并生成方案: task_id={copied_task_id}")
+
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (copied_task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (copied_task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (copied_task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (copied_task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (copied_task_id,))
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (copied['id'],))
+        db.execute('DELETE FROM plate_templates WHERE id = ?', (copied['id'],))
+        db.commit()
+
+        resp_named = client.post(f'/api/templates/{tpl_id}/copy',
+                                 json={'name': '自定义副本名', 'description': '自定义描述'})
+        assert resp_named.status_code == 201, f"自定义名称复制失败: {resp_named.status_code}"
+        named_copy = resp_named.get_json()
+        assert named_copy['name'] == '自定义副本名', f"名称不匹配: {named_copy['name']}"
+        print(f"  ✅ 自定义名称复制: {named_copy['name']}")
+
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (named_copy['id'],))
+        db.execute('DELETE FROM plate_templates WHERE id = ?', (named_copy['id'],))
+        db.commit()
+
+        results.append({'name': '模板复制', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        results.append({'name': '模板复制', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_template_import_conflict(db, app, results):
+    print("\n--- 测试5e: 模板导入冲突处理 ---")
+    try:
+        client = app.test_client()
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要有至少一个模板"
+        existing_name = template['name']
+
+        resp_reject = client.post('/api/templates/import', json={
+            'name': existing_name,
+            'rows': 2,
+            'cols': 3,
+            'wells': [
+                {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': 'X'},
+                {'well_row': 1, 'well_col': 2, 'well_type': 'positive_control'},
+                {'well_row': 1, 'well_col': 3, 'well_type': 'negative_control'},
+                {'well_row': 2, 'well_col': 1, 'well_type': 'empty'},
+                {'well_row': 2, 'well_col': 2, 'well_type': 'sample', 'sample_name': 'Y'},
+                {'well_row': 2, 'well_col': 3, 'well_type': 'sample'},
+            ],
+        })
+        assert resp_reject.status_code == 409, f"拒绝模式应返回409: {resp_reject.status_code}"
+        reject_data = resp_reject.get_json()
+        assert 'conflict' in reject_data, "冲突响应应包含conflict字段"
+        assert reject_data['conflict'] == 'name_exists', f"冲突类型不对: {reject_data['conflict']}"
+        assert 'existing_id' in reject_data, "冲突响应应包含existing_id"
+        print(f"  ✅ 拒绝模式: HTTP {resp_reject.status_code}, conflict={reject_data['conflict']}")
+
+        original_wells_before = db.execute(
+            'SELECT COUNT(*) as cnt FROM template_wells WHERE template_id = ?',
+            (template['id'],)
+        ).fetchone()['cnt']
+
+        resp_rename = client.post('/api/templates/import?conflict_mode=rename', json={
+            'name': existing_name,
+            'rows': 2,
+            'cols': 3,
+            'wells': [
+                {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': 'X'},
+                {'well_row': 1, 'well_col': 2, 'well_type': 'positive_control'},
+                {'well_row': 1, 'well_col': 3, 'well_type': 'negative_control'},
+                {'well_row': 2, 'well_col': 1, 'well_type': 'empty'},
+                {'well_row': 2, 'well_col': 2, 'well_type': 'sample', 'sample_name': 'Y'},
+                {'well_row': 2, 'well_col': 3, 'well_type': 'sample'},
+            ],
+        })
+        assert resp_rename.status_code == 201, f"改名模式应返回201: {resp_rename.status_code}"
+        renamed = resp_rename.get_json()
+        assert renamed['name'] != existing_name, f"改名后名称不应与原名相同: {renamed['name']}"
+        assert renamed['name'].startswith(existing_name), f"改名应基于原名: {renamed['name']}"
+        assert len(renamed['wells']) == 6, f"改名后孔位数不对: {len(renamed['wells'])}"
+        print(f"  ✅ 改名模式: {existing_name} → {renamed['name']}")
+
+        renamed_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ?',
+            (renamed['id'],)
+        ).fetchall()
+        assert len(renamed_wells) == 6, f"改名后数据库孔位数不对: {len(renamed_wells)}"
+
+        original_wells_after = db.execute(
+            'SELECT COUNT(*) as cnt FROM template_wells WHERE template_id = ?',
+            (template['id'],)
+        ).fetchone()['cnt']
+        assert original_wells_before == original_wells_after, \
+            "改名导入不应修改原模板孔位"
+        print(f"  ✅ 改名后原模板未受影响: {original_wells_after} 孔")
+
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (renamed['id'],))
+        db.execute('DELETE FROM plate_templates WHERE id = ?', (renamed['id'],))
+        db.commit()
+
+        original_template_before = db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (template['id'],)
+        ).fetchone()
+        original_wells_before_overwrite = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (template['id'],)
+        ).fetchall()
+
+        resp_overwrite = client.post('/api/templates/import?conflict_mode=overwrite', json={
+            'name': existing_name,
+            'rows': 2,
+            'cols': 3,
+            'wells': [
+                {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': 'X'},
+                {'well_row': 1, 'well_col': 2, 'well_type': 'positive_control'},
+                {'well_row': 1, 'well_col': 3, 'well_type': 'negative_control'},
+                {'well_row': 2, 'well_col': 1, 'well_type': 'empty'},
+                {'well_row': 2, 'well_col': 2, 'well_type': 'sample', 'sample_name': 'Y'},
+                {'well_row': 2, 'well_col': 3, 'well_type': 'sample'},
+            ],
+        })
+        assert resp_overwrite.status_code == 200, f"覆盖模式应返回200: {resp_overwrite.status_code}"
+        overwritten = resp_overwrite.get_json()
+        assert overwritten.get('overwritten') == True, "覆盖响应应标记overwritten=True"
+        assert overwritten['name'] == existing_name, f"覆盖后名称不应变: {overwritten['name']}"
+        assert overwritten['id'] == template['id'], "覆盖后ID应保持不变"
+        assert len(overwritten['wells']) == 6, f"覆盖后孔位数不对: {len(overwritten['wells'])}"
+        print(f"  ✅ 覆盖模式: id={overwritten['id']}, wells={len(overwritten['wells'])}, overwritten=True")
+
+        overwritten_wells = db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (template['id'],)
+        ).fetchall()
+        assert len(overwritten_wells) == 6, f"覆盖后数据库孔位数不对: {len(overwritten_wells)}"
+        well_a1 = [w for w in overwritten_wells if w['well_row'] == 1 and w['well_col'] == 1][0]
+        assert well_a1['sample_name'] == 'X', f"覆盖后A1样本名不对: {well_a1['sample_name']}"
+
+        db.execute('DELETE FROM template_wells WHERE template_id = ?', (template['id'],))
+        for w in original_wells_before_overwrite:
+            db.execute('''
+                INSERT INTO template_wells (template_id, well_row, well_col, well_type, sample_name, note)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (template['id'], w['well_row'], w['well_col'], w['well_type'],
+                  w['sample_name'], w['note']))
+        db.execute('''
+            UPDATE plate_templates SET rows = ?, cols = ? WHERE id = ?
+        ''', (original_template_before['rows'], original_template_before['cols'], template['id']))
+        db.commit()
+
+        results.append({'name': '模板导入冲突处理', 'passed': True})
+        print("  ✅ 通过 (拒绝/改名/覆盖三种模式)")
+    except Exception as e:
+        results.append({'name': '模板导入冲突处理', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_template_delete_protection(db, app, results):
+    print("\n--- 测试5f: 模板删除保护 ---")
+    try:
+        client = app.test_client()
+
+        cursor = db.execute('''
+            INSERT INTO plate_templates (name, rows, cols, description)
+            VALUES (?, ?, ?, ?)
+        ''', ('_delete_test_template', 2, 3, '删除保护测试'))
+        free_tpl_id = cursor.lastrowid
+        for r in range(1, 3):
+            for c in range(1, 4):
+                db.execute('''
+                    INSERT INTO template_wells (template_id, well_row, well_col, well_type)
+                    VALUES (?, ?, ?, ?)
+                ''', (free_tpl_id, r, c, 'sample'))
+        db.commit()
+
+        resp_free = client.delete(f'/api/templates/{free_tpl_id}')
+        assert resp_free.status_code == 200, f"无引用模板应可删除: {resp_free.status_code}"
+        print(f"  ✅ 无引用模板可删除: id={free_tpl_id}")
+
+        cursor2 = db.execute('''
+            INSERT INTO plate_templates (name, rows, cols, description)
+            VALUES (?, ?, ?, ?)
+        ''', ('_referenced_test_template', 2, 3, '被引用测试'))
+        ref_tpl_id = cursor2.lastrowid
+        for r in range(1, 3):
+            for c in range(1, 4):
+                db.execute('''
+                    INSERT INTO template_wells (template_id, well_row, well_col, well_type)
+                    VALUES (?, ?, ?, ?)
+                ''', (ref_tpl_id, r, c, 'sample'))
+        db.commit()
+
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        ref_task_id = service.create_task(
+            name='_delete_protection_test_task',
+            template_id=ref_tpl_id,
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        resp_blocked = client.delete(f'/api/templates/{ref_tpl_id}')
+        assert resp_blocked.status_code == 409, f"有引用模板应返回409: {resp_blocked.status_code}"
+        blocked_data = resp_blocked.get_json()
+        assert 'referencing_tasks' in blocked_data, "拦截响应应包含referencing_tasks"
+        assert blocked_data['task_count'] >= 1, f"引用任务数应为>=1: {blocked_data['task_count']}"
+        assert blocked_data['reason'] == 'template_in_use', f"原因不对: {blocked_data['reason']}"
+        print(f"  ✅ 有引用模板被拦截: HTTP 409, reason=template_in_use, "
+              f"task_count={blocked_data['task_count']}")
+
+        template_still_exists = db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (ref_tpl_id,)
+        ).fetchone()
+        assert template_still_exists is not None, "被拦截的模板不应被删除"
+        print(f"  ✅ 被拦截的模板仍然存在: {template_still_exists['name']}")
+
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (ref_task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (ref_task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (ref_task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (ref_task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (ref_task_id,))
+        db.commit()
+
+        resp_after_cleanup = client.delete(f'/api/templates/{ref_tpl_id}')
+        assert resp_after_cleanup.status_code == 200, \
+            f"清理引用后应可删除: {resp_after_cleanup.status_code}"
+        print(f"  ✅ 清理引用后模板可删除: id={ref_tpl_id}")
+
+        deleted_check = db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (ref_tpl_id,)
+        ).fetchone()
+        assert deleted_check is None, "模板应该已被删除"
+
+        results.append({'name': '模板删除保护', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        results.append({'name': '模板删除保护', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_template_history_records(db, results):
+    print("\n--- 测试5g: 模板操作历史记录 ---")
+    try:
+        from app.services.history_service import HistoryService
+        history_service = HistoryService(db, '')
+
+        template_actions = history_service.get_history(action_type='template_created', limit=100)
+        template_actions += history_service.get_history(action_type='template_exported', limit=100)
+        template_actions += history_service.get_history(action_type='template_copied', limit=100)
+        template_actions += history_service.get_history(action_type='template_imported', limit=100)
+        template_actions += history_service.get_history(action_type='template_deleted', limit=100)
+
+        assert len(template_actions) > 0, "应该有模板操作历史记录"
+        print(f"  ✅ 模板历史记录: {len(template_actions)} 条")
+
+        action_types = set(h['action_type'] for h in template_actions)
+        assert 'template_imported' in action_types, "缺少template_imported记录"
+        print(f"  ✅ 操作类型: {', '.join(sorted(action_types))}")
+
+        for h in template_actions:
+            assert h['task_id'] is None, f"模板操作历史task_id应为None: {h['task_id']}"
+            assert h['detail'], f"模板操作历史detail不应为空: id={h['id']}"
+
+        results.append({'name': '模板操作历史记录', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        results.append({'name': '模板操作历史记录', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
 
 
 def test_well_conflict(db, results):
