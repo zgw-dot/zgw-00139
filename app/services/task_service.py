@@ -12,6 +12,9 @@ class TaskService:
         self.engine = LiquidHandlingEngine()
     
     def create_task(self, name, template_id, total_volume, volume_unit='ul'):
+        if not UnitConverter.is_volume_unit(volume_unit):
+            raise ValueError(f"无效的体积单位: {volume_unit}")
+        
         cursor = self.db.execute(
             'INSERT INTO tasks (name, template_id, total_volume, volume_unit, status) VALUES (?, ?, ?, ?, ?)',
             (name, template_id, total_volume, volume_unit, 'draft')
@@ -35,6 +38,9 @@ class TaskService:
         if task['status'] not in ['draft', 'rejected']:
             raise ValueError('只有草稿或已驳回状态的任务才能生成方案')
         
+        if not UnitConverter.is_volume_unit(task['volume_unit']):
+            raise ValueError(f"任务的体积单位无效: {task['volume_unit']}")
+        
         template = self.db.execute(
             'SELECT * FROM plate_templates WHERE id = ?', (task['template_id'],)
         ).fetchone()
@@ -47,6 +53,16 @@ class TaskService:
         all_primers = self.db.execute('SELECT * FROM primers').fetchall()
         all_reagents = self.db.execute('SELECT * FROM reagents').fetchall()
         all_samples = self.db.execute('SELECT * FROM samples').fetchall()
+        
+        for s in all_samples:
+            if not UnitConverter.is_volume_unit(s['volume_unit']):
+                raise ValueError(f"样本 {s['name']} 的体积单位无效: {s['volume_unit']}")
+        for p in all_primers:
+            if not UnitConverter.is_volume_unit(p['volume_unit']):
+                raise ValueError(f"引物 {p['name']} 的体积单位无效: {p['volume_unit']}")
+        for r in all_reagents:
+            if not UnitConverter.is_volume_unit(r['volume_unit']):
+                raise ValueError(f"试剂 {r['name']} 的体积单位无效: {r['volume_unit']}")
         
         primer = None
         if primer_id:

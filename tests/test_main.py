@@ -76,6 +76,7 @@ def run_tests():
         test_import_reagents(db, test_results)
         test_import_template(db, test_results)
         test_well_conflict(db, test_results)
+        test_invalid_unit_interception(db, test_results)
         test_create_tasks(db, test_results)
         test_generate_plans(db, test_results)
         test_normal_approval(db, test_results)
@@ -323,8 +324,117 @@ def test_well_conflict(db, results):
         print(f"  ❌ 失败: {e}")
 
 
+def test_invalid_unit_interception(db, results):
+    print("\n--- 测试7: 非法单位拦截 ---")
+    try:
+        from app.services.data_importer import DataImporter
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        bad_sample_csv = "name,volume,volume_unit,concentration,concentration_unit,description\nBadS1,100,foobar,50,ng/uL,坏样本\n"
+        try:
+            DataImporter.parse_samples_csv(bad_sample_csv)
+            results.append({'name': '非法单位拦截', 'passed': False, 'error': '样本非法体积单位未拦截'})
+            print("  ❌ 失败: 样本非法体积单位未在导入阶段拦截")
+            raise AssertionError("stop")
+        except ValueError as e:
+            if '体积单位无效' not in str(e):
+                raise
+            print(f"  ✅ 样本导入拦截: {str(e)[:60]}")
+        
+        bad_primer_csv = "name,sequence,volume,volume_unit,concentration,concentration_unit,description\nBadP1,ATCG,500,foobar,10,uM,坏引物\n"
+        try:
+            DataImporter.parse_primers_csv(bad_primer_csv)
+            results.append({'name': '非法单位拦截', 'passed': False, 'error': '引物非法体积单位未拦截'})
+            print("  ❌ 失败: 引物非法体积单位未在导入阶段拦截")
+            raise AssertionError("stop")
+        except ValueError as e:
+            if '体积单位无效' not in str(e):
+                raise
+            print(f"  ✅ 引物导入拦截: {str(e)[:60]}")
+        
+        bad_reagent_csv = "name,type,volume,volume_unit,concentration,concentration_unit,min_pipette_volume,description\nBadR1,water,1000,xyz,,0.5,,\n"
+        try:
+            DataImporter.parse_reagents_csv(bad_reagent_csv)
+            results.append({'name': '非法单位拦截', 'passed': False, 'error': '试剂非法体积单位未拦截'})
+            print("  ❌ 失败: 试剂非法体积单位未在导入阶段拦截")
+            raise AssertionError("stop")
+        except ValueError as e:
+            if '体积单位无效' not in str(e):
+                raise
+            print(f"  ✅ 试剂导入拦截: {str(e)[:60]}")
+        
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        try:
+            service.create_task(
+                name='坏单位任务',
+                template_id=template['id'],
+                total_volume=20,
+                volume_unit='not_a_unit'
+            )
+            results.append({'name': '非法单位拦截', 'passed': False, 'error': '任务创建非法单位未拦截'})
+            print("  ❌ 失败: 任务创建阶段非法单位未拦截")
+            raise AssertionError("stop")
+        except ValueError as e:
+            if '无效的体积单位' not in str(e):
+                raise
+            print(f"  ✅ 任务创建拦截: {str(e)[:60]}")
+        
+        bad_task_id = service.create_task(
+            name='暂时合法后续被污染的任务',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        db.execute("UPDATE tasks SET volume_unit = 'broken' WHERE id = ?", (bad_task_id,))
+        db.commit()
+        
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix'").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water'").fetchone()
+        
+        wells_before = db.execute('SELECT COUNT(*) as c FROM task_wells WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        usage_before_r = db.execute('SELECT COUNT(*) as c FROM task_reagent_usage WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        usage_before_p = db.execute('SELECT COUNT(*) as c FROM task_primer_usage WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        status_before = db.execute('SELECT status FROM tasks WHERE id = ?', (bad_task_id,)).fetchone()['status']
+        
+        try:
+            service.generate_plan(task_id=bad_task_id, primer_id=primer['id'], master_mix_id=mm['id'], water_id=water['id'])
+            results.append({'name': '非法单位拦截', 'passed': False, 'error': '生成方案阶段非法单位未拦截'})
+            print("  ❌ 失败: 生成方案阶段非法单位未拦截")
+            raise AssertionError("stop")
+        except ValueError as e:
+            if '体积单位无效' not in str(e):
+                raise
+            print(f"  ✅ 生成方案拦截: {str(e)[:60]}")
+        
+        wells_after = db.execute('SELECT COUNT(*) as c FROM task_wells WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        usage_after_r = db.execute('SELECT COUNT(*) as c FROM task_reagent_usage WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        usage_after_p = db.execute('SELECT COUNT(*) as c FROM task_primer_usage WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
+        status_after = db.execute('SELECT status FROM tasks WHERE id = ?', (bad_task_id,)).fetchone()['status']
+        
+        assert wells_before == wells_after, f"失败生成不应写孔位数据 ({wells_before} → {wells_after})"
+        assert usage_before_r == usage_after_r, "失败生成不应写试剂使用数据"
+        assert usage_before_p == usage_after_p, "失败生成不应写引物使用数据"
+        assert status_before == status_after, f"失败生成不应改任务状态 ({status_before} → {status_after})"
+        
+        inv_before = db.execute('SELECT SUM(volume) as v FROM reagents').fetchone()['v']
+        assert inv_before is not None, "应该有库存"
+        
+        db.execute('DELETE FROM tasks WHERE id = ?', (bad_task_id,))
+        db.commit()
+        
+        results.append({'name': '非法单位拦截', 'passed': True})
+        print(f"  ✅ 通过 (导入/创建/生成三阶段均拦截，失败无脏数据)")
+    except AssertionError:
+        pass
+    except Exception as e:
+        results.append({'name': '非法单位拦截', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
 def test_create_tasks(db, results):
-    print("\n--- 测试7: 创建任务 ---")
+    print("\n--- 测试8: 创建任务 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -360,7 +470,7 @@ def test_create_tasks(db, results):
 
 
 def test_generate_plans(db, results):
-    print("\n--- 测试8: 生成配液方案 ---")
+    print("\n--- 测试9: 生成配液方案 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -398,7 +508,7 @@ def test_generate_plans(db, results):
 
 
 def test_normal_approval(db, results):
-    print("\n--- 测试9: 正常体积任务直接批准 ---")
+    print("\n--- 测试10: 正常体积任务直接批准 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -427,7 +537,7 @@ def test_normal_approval(db, results):
 
 
 def test_min_pipette_blocking(db, results):
-    print("\n--- 测试10: 小体积任务最小移液拦截 ---")
+    print("\n--- 测试11: 小体积任务最小移液拦截 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -458,7 +568,7 @@ def test_min_pipette_blocking(db, results):
 
 
 def test_deviation_and_approve(db, results):
-    print("\n--- 测试11: 偏差备注后批准 ---")
+    print("\n--- 测试12: 偏差备注后批准 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -488,7 +598,7 @@ def test_deviation_and_approve(db, results):
 
 
 def test_inventory_deduction(db, results):
-    print("\n--- 测试12: 库存扣减验证 ---")
+    print("\n--- 测试13: 库存扣减验证 ---")
     try:
         task = db.execute("SELECT * FROM tasks WHERE name = '测试任务-正常体积'").fetchone()
         
@@ -524,7 +634,7 @@ def test_inventory_deduction(db, results):
 
 
 def test_revoke_approval(db, results):
-    print("\n--- 测试13: 撤销确认 ---")
+    print("\n--- 测试14: 撤销确认 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -565,7 +675,7 @@ def test_revoke_approval(db, results):
 
 
 def test_reject_task(db, results):
-    print("\n--- 测试14: 驳回任务 ---")
+    print("\n--- 测试15: 驳回任务 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -611,7 +721,7 @@ def test_reject_task(db, results):
 
 
 def test_history_records(db, app, db_path, results):
-    print("\n--- 测试15: 历史记录 ---")
+    print("\n--- 测试16: 历史记录 ---")
     try:
         from app.services.history_service import HistoryService
         history_service = HistoryService(db, app.config['DATA_DIR'])
@@ -655,7 +765,7 @@ def test_history_records(db, app, db_path, results):
 
 
 def test_report_export(db, results):
-    print("\n--- 测试16: 报告导出 ---")
+    print("\n--- 测试17: 报告导出 ---")
     try:
         from app.services.report_service import ReportService
         report_service = ReportService(db)
@@ -692,7 +802,7 @@ def test_report_export(db, results):
 
 
 def test_insufficient_inventory(db, results):
-    print("\n--- 测试17: 库存不足拦截 ---")
+    print("\n--- 测试18: 库存不足拦截 ---")
     try:
         from app.services.task_service import TaskService
         service = TaskService(db)
@@ -744,7 +854,7 @@ def test_insufficient_inventory(db, results):
 
 
 def test_data_persistence(db, app, db_path, results):
-    print("\n--- 测试18: 重启后数据一致性 ---")
+    print("\n--- 测试19: 重启后数据一致性 ---")
     try:
         tasks_before = db.execute('SELECT id, name, status FROM tasks ORDER BY id').fetchall()
         reagents_before = db.execute('SELECT id, name, volume FROM reagents ORDER BY id').fetchall()

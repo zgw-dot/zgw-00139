@@ -2,6 +2,8 @@ import csv
 import json
 import io
 
+from app.services.unit_converter import UnitConverter
+
 class DataImporter:
     
     @staticmethod
@@ -19,6 +21,8 @@ class DataImporter:
                 'description': row.get('description', '').strip(),
             }
             if sample['name']:
+                if not UnitConverter.is_volume_unit(sample['volume_unit']):
+                    raise ValueError(f"样本 {sample['name']} 的体积单位无效: {sample['volume_unit']}")
                 samples.append(sample)
         
         return samples
@@ -40,6 +44,8 @@ class DataImporter:
                 'description': row.get('description', '').strip(),
             }
             if primer['name']:
+                if not UnitConverter.is_volume_unit(primer['volume_unit']):
+                    raise ValueError(f"引物 {primer['name']} 的体积单位无效: {primer['volume_unit']}")
                 primers.append(primer)
         
         return primers
@@ -62,6 +68,10 @@ class DataImporter:
                 'description': row.get('description', '').strip(),
             }
             if reagent['name']:
+                if not UnitConverter.is_volume_unit(reagent['volume_unit']):
+                    raise ValueError(f"试剂 {reagent['name']} 的体积单位无效: {reagent['volume_unit']}")
+                if reagent.get('min_pipette_unit') and not UnitConverter.is_volume_unit(reagent['min_pipette_unit']):
+                    raise ValueError(f"试剂 {reagent['name']} 的最小移液单位无效: {reagent['min_pipette_unit']}")
                 reagents.append(reagent)
         
         return reagents
