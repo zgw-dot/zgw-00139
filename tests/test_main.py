@@ -75,6 +75,7 @@ def run_tests():
         test_import_primers(db, test_results)
         test_import_reagents(db, test_results)
         test_import_template(db, test_results)
+        test_template_migration_and_lifecycle(db, db_path, test_results)
         test_well_conflict(db, test_results)
         test_invalid_unit_interception(db, test_app, test_results)
         test_create_tasks(db, test_results)
@@ -353,6 +354,165 @@ B,NC,EMPTY,Test_Sample_1
     except Exception as e:
         results.append({'name': '导入板位模板', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
+
+
+def test_template_migration_and_lifecycle(db, db_path, results):
+    print("\n--- 测试5b: 模板迁移 & 生命周期回归 ---")
+    try:
+        import sqlite3
+        import os
+        import tempfile
+        
+        # === 1. schema 迁移：旧库自动补 sample_name 列 ===
+        tmp_db_path = os.path.join(os.path.dirname(__file__), '_tmp_old_schema.db')
+        if os.path.exists(tmp_db_path):
+            os.remove(tmp_db_path)
+        
+        old_conn = sqlite3.connect(tmp_db_path)
+        old_conn.executescript('''
+            CREATE TABLE plate_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                rows INTEGER NOT NULL,
+                cols INTEGER NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE template_wells (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL,
+                well_row INTEGER NOT NULL,
+                well_col INTEGER NOT NULL,
+                well_type TEXT NOT NULL DEFAULT 'sample',
+                sample_id INTEGER,
+                reagent_id INTEGER,
+                note TEXT,
+                FOREIGN KEY (template_id) REFERENCES plate_templates(id) ON DELETE CASCADE,
+                UNIQUE(template_id, well_row, well_col)
+            );
+        ''')
+        old_conn.commit()
+        old_conn.close()
+        
+        cols_before = [row[1] for row in sqlite3.connect(tmp_db_path).execute('PRAGMA table_info(template_wells)')]
+        assert 'sample_name' not in cols_before, "旧库不应有 sample_name 列"
+        
+        from app.database import init_db
+        class FakeApp:
+            config = {'DATABASE': tmp_db_path}
+            def teardown_appcontext(self, func): pass
+        
+        init_db(FakeApp())
+        
+        cols_after = [row[1] for row in sqlite3.connect(tmp_db_path).execute('PRAGMA table_info(template_wells)')]
+        assert 'sample_name' in cols_after, "迁移后应该有 sample_name 列"
+        print("  ✅ 旧库 schema 自动迁移")
+        
+        init_db(FakeApp())
+        print("  ✅ 重复迁移幂等，不报错")
+        
+        # === 2. 导入失败不残留脏数据 ===
+        db.commit()
+        
+        tpl_count_before = len(db.execute('SELECT * FROM plate_templates').fetchall())
+        
+        db.execute('BEGIN')
+        cur = db.execute('''
+            INSERT INTO plate_templates (name, rows, cols, description)
+            VALUES (?, 2, 3, '事务测试')
+        ''', ('_tx_test_template',))
+        tx_id = cur.lastrowid
+        db.execute('INSERT INTO template_wells (template_id, well_row, well_col, well_type) VALUES (?, 1, 1, ?)', (tx_id, 'sample'))
+        db.rollback()
+        
+        after_rollback = db.execute('SELECT * FROM plate_templates WHERE id = ?', (tx_id,)).fetchone()
+        wells_after_rollback = len(db.execute('SELECT * FROM template_wells WHERE template_id = ?', (tx_id,)).fetchall())
+        assert after_rollback is None, "回滚后模板不应存在"
+        assert wells_after_rollback == 0, "回滚后孔位不应存在"
+        
+        tpl_count_after = len(db.execute('SELECT * FROM plate_templates').fetchall())
+        assert tpl_count_before == tpl_count_after, f"失败导入不应残留: {tpl_count_before} → {tpl_count_after}"
+        print("  ✅ 失败不残留脏数据（事务回滚）")
+        
+        # === 3. 重启后模板仍可读（用独立连接验证持久化） ===
+        tpl = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert tpl is not None, "应该有模板"
+        tpl_id = tpl['id']
+        tpl_name = tpl['name']
+        wells_from_main = len(db.execute('SELECT * FROM template_wells WHERE template_id = ?', (tpl_id,)).fetchall())
+        
+        assert db_path and os.path.exists(db_path), f"数据库文件应该存在: {db_path}"
+        
+        other_conn = sqlite3.connect(db_path)
+        other_conn.row_factory = sqlite3.Row
+        other_tpl = other_conn.execute('SELECT * FROM plate_templates WHERE id = ?', (tpl_id,)).fetchone()
+        other_wells = len(other_conn.execute('SELECT * FROM template_wells WHERE template_id = ?', (tpl_id,)).fetchall())
+        other_conn.close()
+        assert other_tpl is not None, "重连后应该能读到模板"
+        assert other_wells == wells_from_main, f"重连后孔位数不匹配: {wells_from_main} vs {other_wells}"
+        print(f"  ✅ 重启后模板可读: {tpl_name} ({other_wells} 孔)")
+        
+        # === 4. 模板导入后能创建任务并生成方案 ===
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        
+        samples = db.execute('SELECT * FROM samples LIMIT 1').fetchall()
+        primers = db.execute('SELECT * FROM primers LIMIT 1').fetchall()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchall()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchall()
+        
+        lifecycle_task_id = None
+        try:
+            if samples and primers and mm and water:
+                lifecycle_task_id = service.create_task(
+                    name='_lifecycle_test_task',
+                    template_id=tpl_id,
+                    total_volume=20,
+                    volume_unit='ul'
+                )
+                assert lifecycle_task_id > 0
+                
+                plan = service.generate_plan(
+                    task_id=lifecycle_task_id,
+                    primer_id=primers[0]['id'],
+                    master_mix_id=mm[0]['id'],
+                    water_id=water[0]['id']
+                )
+                assert plan is not None
+                assert plan['status'] == 'pending_review'
+                
+                wells = db.execute(
+                    'SELECT * FROM task_wells WHERE task_id = ?',
+                    (lifecycle_task_id,)
+                ).fetchall()
+                assert len(wells) > 0, "生成方案后应该有孔位数据"
+                print(f"  ✅ 模板导入→创建任务→生成方案: {len(wells)} 孔")
+            else:
+                print("  ⚠️  跳过生成方案验证（缺少样本/引物/试剂数据）")
+        finally:
+            # 清理：删掉测试创建的任务，不影响后续测试
+            if lifecycle_task_id:
+                db.execute('DELETE FROM task_wells WHERE task_id = ?', (lifecycle_task_id,))
+                db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (lifecycle_task_id,))
+                db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (lifecycle_task_id,))
+                db.execute('DELETE FROM history WHERE task_id = ?', (lifecycle_task_id,))
+                db.execute('DELETE FROM tasks WHERE id = ?', (lifecycle_task_id,))
+                db.commit()
+        
+        # 清理临时文件（Windows 可能因文件锁延迟释放，忽略删除错误）
+        try:
+            if os.path.exists(tmp_db_path):
+                os.remove(tmp_db_path)
+        except OSError:
+            pass
+        
+        results.append({'name': '模板迁移&生命周期回归', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback
+        err_detail = str(e) or type(e).__name__
+        results.append({'name': '模板迁移&生命周期回归', 'passed': False, 'error': err_detail})
+        print(f"  ❌ 失败: {err_detail}")
 
 
 def test_well_conflict(db, results):

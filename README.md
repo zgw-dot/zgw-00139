@@ -109,7 +109,7 @@ python run.py
 
 ### 验证命令
 
-运行完整测试套件（19 个测试用例）：
+运行完整测试套件（20 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell

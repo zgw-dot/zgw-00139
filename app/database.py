@@ -192,6 +192,12 @@ def init_db(app):
         );
     ''')
     
+    # schema 迁移：补齐旧库缺少的列
+    cur = conn.execute("PRAGMA table_info(template_wells)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if 'sample_name' not in existing_cols:
+        conn.execute("ALTER TABLE template_wells ADD COLUMN sample_name TEXT")
+    
     conn.commit()
     conn.close()
     

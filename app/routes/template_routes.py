@@ -108,6 +108,7 @@ def import_template():
         return jsonify({'error': f'CSV 解析失败: {str(e)}'}), 400
     
     try:
+        db.execute('BEGIN')
         cursor = db.execute('''
             INSERT INTO plate_templates (name, rows, cols, description)
             VALUES (?, ?, ?, ?)
@@ -141,6 +142,7 @@ def import_template():
         
         return jsonify(result), 201
     except Exception as e:
+        db.rollback()
         return jsonify({'error': str(e)}), 400
 
 @template_bp.route('/<int:template_id>', methods=['DELETE'])
