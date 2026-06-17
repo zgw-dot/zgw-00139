@@ -225,7 +225,6 @@ zgw-00139/
 │   └── pcr_planner.db        # SQLite 数据库
 ├── tests/                    # 测试套件
 │   └── test_main.py
-├── run_tests.py              # 测试运行脚本
 ├── run.py                    # 应用入口
 └── requirements.txt          # 依赖清单
 ```

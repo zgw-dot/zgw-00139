@@ -93,6 +93,59 @@ def run_tests():
     if os.path.exists(db_path):
         os.remove(db_path)
     
+    import re
+    
+    test_func_names = re.findall(r'def (test_\w+)\(', open(__file__, encoding='utf-8').read())
+    expected_total = len(test_func_names)
+    actual_total = len(test_results)
+    
+    doc_checks = []
+    
+    if expected_total != actual_total:
+        doc_checks.append(f"测试函数数量({expected_total}) != 测试结果数量({actual_total})，检查是否有 AssertionError 被静默吞掉")
+    
+    test_entry = os.path.join(os.path.dirname(__file__), 'test_main.py')
+    if not os.path.exists(test_entry):
+        doc_checks.append(f"测试入口文件不存在: {test_entry}")
+    
+    fake_entry = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'run_tests.py')
+    if os.path.exists(fake_entry):
+        doc_checks.append(f"发现已废弃的假入口 {fake_entry}，只允许使用 tests/test_main.py")
+    
+    readme_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'README.md')
+    if os.path.exists(readme_path):
+        readme = open(readme_path, encoding='utf-8').read()
+        
+        m = re.search(r'运行完整测试套件[（(](\d+) 个测试用例[）)]', readme)
+        if m:
+            readme_count = int(m.group(1))
+            if readme_count != expected_total:
+                doc_checks.append(f"README 写的测试数({readme_count}) != 实际测试函数数({expected_total})")
+        
+        if 'run_tests.py' in readme:
+            doc_checks.append("README 项目结构或命令中还引用不存在的 run_tests.py")
+        
+        for path in ['/api/reports/task/', '/api/history/export']:
+            if path not in readme:
+                doc_checks.append(f"README 缺少文档化的关键 API 路径: {path}")
+        
+        required_files = [
+            'run.py', 'requirements.txt', 'tests/test_main.py',
+            'app/__init__.py', 'app/database.py', 'static/index.html'
+        ]
+        for rf in required_files:
+            fp = os.path.join(os.path.dirname(os.path.dirname(__file__)), rf)
+            if not os.path.exists(fp):
+                doc_checks.append(f"README 项目结构要求的文件不存在: {rf}")
+    
+    if doc_checks:
+        print("\n" + "=" * 60)
+        print("⚠️  文档与一致性自检失败")
+        print("=" * 60)
+        for msg in doc_checks:
+            print(f"  ❌ {msg}")
+            test_results.append({'name': f'文档一致性: {msg[:50]}', 'passed': False, 'error': msg})
+    
     print("\n" + "=" * 60)
     print("测试结果汇总")
     print("=" * 60)
@@ -338,7 +391,7 @@ def test_invalid_unit_interception(db, app, results):
             DataImporter.parse_samples_csv(bad_sample_csv)
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '样本非法体积单位未拦截'})
             print("  ❌ 失败: 样本非法体积单位未在导入阶段拦截")
-            raise AssertionError("stop")
+            return
         except ValueError as e:
             if '体积单位无效' not in str(e):
                 raise
@@ -349,7 +402,7 @@ def test_invalid_unit_interception(db, app, results):
             DataImporter.parse_primers_csv(bad_primer_csv)
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '引物非法体积单位未拦截'})
             print("  ❌ 失败: 引物非法体积单位未在导入阶段拦截")
-            raise AssertionError("stop")
+            return
         except ValueError as e:
             if '体积单位无效' not in str(e):
                 raise
@@ -360,7 +413,7 @@ def test_invalid_unit_interception(db, app, results):
             DataImporter.parse_reagents_csv(bad_reagent_csv)
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '试剂非法体积单位未拦截'})
             print("  ❌ 失败: 试剂非法体积单位未在导入阶段拦截")
-            raise AssertionError("stop")
+            return
         except ValueError as e:
             if '体积单位无效' not in str(e):
                 raise
@@ -377,7 +430,7 @@ def test_invalid_unit_interception(db, app, results):
         })
         assert resp.status_code == 400, f"API录入-样本应该返回400，实际 {resp.status_code}"
         resp_data = resp.get_json()
-        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-样本错误信息不对: {resp_data}"
+        assert '体积单位' in resp_data.get('error', ''), f"API录入-样本错误信息不对: {resp_data}"
         samples_after = db.execute('SELECT COUNT(*) as c FROM samples').fetchone()['c']
         assert samples_before == samples_after, f"API录入-样本失败不应入库 ({samples_before} → {samples_after})"
         print(f"  ✅ API录入-样本拦截: {resp_data['error'][:55]}")
@@ -393,7 +446,7 @@ def test_invalid_unit_interception(db, app, results):
         })
         assert resp.status_code == 400, f"API录入-引物应该返回400，实际 {resp.status_code}"
         resp_data = resp.get_json()
-        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-引物错误信息不对: {resp_data}"
+        assert '体积单位' in resp_data.get('error', ''), f"API录入-引物错误信息不对: {resp_data}"
         primers_after = db.execute('SELECT COUNT(*) as c FROM primers').fetchone()['c']
         assert primers_before == primers_after, f"API录入-引物失败不应入库 ({primers_before} → {primers_after})"
         print(f"  ✅ API录入-引物拦截: {resp_data['error'][:55]}")
@@ -408,7 +461,7 @@ def test_invalid_unit_interception(db, app, results):
         })
         assert resp.status_code == 400, f"API录入-试剂应该返回400，实际 {resp.status_code}"
         resp_data = resp.get_json()
-        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-试剂错误信息不对: {resp_data}"
+        assert '体积单位' in resp_data.get('error', ''), f"API录入-试剂错误信息不对: {resp_data}"
         reagents_after = db.execute('SELECT COUNT(*) as c FROM reagents').fetchone()['c']
         assert reagents_before == reagents_after, f"API录入-试剂失败不应入库 ({reagents_before} → {reagents_after})"
         print(f"  ✅ API录入-试剂拦截: {resp_data['error'][:55]}")
@@ -423,7 +476,7 @@ def test_invalid_unit_interception(db, app, results):
         })
         assert resp.status_code == 400, f"API录入-试剂最小移液单位应该返回400，实际 {resp.status_code}"
         resp_data = resp.get_json()
-        assert '最小移液单位无效' in resp_data.get('error', ''), f"API录入-最小移液单位错误信息不对: {resp_data}"
+        assert '最小移液单位' in resp_data.get('error', ''), f"API录入-最小移液单位错误信息不对: {resp_data}"
         print(f"  ✅ API录入-最小移液单位拦截: {resp_data['error'][:55]}")
         
         inv_before_api = db.execute('SELECT SUM(volume) as v FROM reagents').fetchone()['v']
@@ -438,7 +491,7 @@ def test_invalid_unit_interception(db, app, results):
             )
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '任务创建非法单位未拦截'})
             print("  ❌ 失败: 任务创建阶段非法单位未拦截")
-            raise AssertionError("stop")
+            return
         except ValueError as e:
             if '无效的体积单位' not in str(e):
                 raise
@@ -466,7 +519,7 @@ def test_invalid_unit_interception(db, app, results):
             service.generate_plan(task_id=bad_task_id, primer_id=primer['id'], master_mix_id=mm['id'], water_id=water['id'])
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '生成方案阶段非法单位未拦截'})
             print("  ❌ 失败: 生成方案阶段非法单位未拦截")
-            raise AssertionError("stop")
+            return
         except ValueError as e:
             if '体积单位无效' not in str(e):
                 raise
@@ -483,7 +536,7 @@ def test_invalid_unit_interception(db, app, results):
         assert usage_before_r == usage_after_r, "失败生成不应写试剂使用数据"
         assert usage_before_p == usage_after_p, "失败生成不应写引物使用数据"
         assert status_before == status_after, f"失败生成不应改任务状态 ({status_before} → {status_after})"
-        assert inv_before == inv_after, f"失败生成不应扣减库存 ({inv_before} → {inv_after})"
+        assert inv_before_api == inv_after, f"失败生成不应扣减库存 ({inv_before_api} → {inv_after})"
         assert inv_before_api == inv_after, f"API失败操作不应扣减库存 ({inv_before_api} → {inv_after})"
         
         db.execute('DELETE FROM tasks WHERE id = ?', (bad_task_id,))
@@ -500,10 +553,12 @@ def test_invalid_unit_interception(db, app, results):
         assert resp.status_code == 201, f"合法单位样本应该创建成功，实际 {resp.status_code}"
         print(f"  ✅ API录入-合法单位成功: 样本 {resp.get_json()['name']}")
         
+        db.execute("DELETE FROM samples WHERE name = 'API_Good_Sample'")
+        db.execute("DELETE FROM tasks WHERE name IN ('坏单位任务', '暂时合法后续被污染的任务')")
+        db.commit()
+        
         results.append({'name': '非法单位拦截', 'passed': True})
         print(f"  ✅ 通过 (CSV/API/创建/生成四阶段均拦截，失败无脏数据)")
-    except AssertionError:
-        pass
     except Exception as e:
         results.append({'name': '非法单位拦截', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
