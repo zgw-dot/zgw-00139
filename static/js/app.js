@@ -1,6 +1,26 @@
 const API_BASE = '/api';
 
 let currentTaskId = null;
+let currentTaskStatus = null;
+let currentSnapshots = [];
+let selectedVersionA = null;
+let selectedVersionB = null;
+
+const snapTypeLabels = {
+    'generate': '生成方案',
+    'import': '导入方案',
+    'copy': '复制任务',
+    'pre_approve': '批准前',
+    'manual': '手动创建'
+};
+
+const snapStatusLabels = {
+    'draft': '草稿',
+    'pending_review': '待复核',
+    'approved': '已批准',
+    'rejected': '已驳回',
+    'revoked': '已撤销'
+};
 
 document.addEventListener('DOMContentLoaded', function() {
     setupTabs();
@@ -361,6 +381,11 @@ async function showTaskDetail(taskId) {
         html += `<div class="info-row"><span class="info-label">创建时间</span><span class="info-value">${data.task.created_at}</span></div>`;
         html += '</div>';
         
+        html += '<div class="detail-section">';
+        html += '<h4>版本快照</h4>';
+        html += '<div id="snapshot-section"><p style="color:#999;font-size:13px;">加载中...</p></div>';
+        html += '</div>';
+        
         if (data.task.deviation_note) {
             html += '<div class="detail-section">';
             html += '<h4>偏差备注</h4>';
@@ -456,6 +481,9 @@ async function showTaskDetail(taskId) {
         detailEl.classList.remove('hidden');
         setTimeout(() => detailEl.classList.add('active'), 10);
         
+        currentTaskStatus = data.task.status;
+        loadTaskSnapshots(taskId, data.task.status);
+        
     } catch (e) {
         showToast('加载任务详情失败', 'error');
         console.error(e);
@@ -469,6 +497,321 @@ function closeTaskDetail() {
         detailEl.classList.add('hidden');
         currentTaskId = null;
     }, 300);
+}
+
+async function loadTaskSnapshots(taskId, taskStatus) {
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${taskId}/snapshots`);
+        if (!response.ok) {
+            throw new Error('加载快照列表失败');
+        }
+        const snapshots = await response.json();
+        currentSnapshots = snapshots;
+        
+        renderSnapshotSection(snapshots, taskStatus);
+    } catch (e) {
+        const sectionEl = document.getElementById('snapshot-section');
+        if (sectionEl) {
+            sectionEl.innerHTML = '<p style="color:#dc3545;font-size:13px;">加载快照列表失败</p>';
+        }
+        console.error(e);
+    }
+}
+
+function renderSnapshotSection(snapshots, taskStatus) {
+    const sectionEl = document.getElementById('snapshot-section');
+    if (!sectionEl) return;
+    
+    if (!snapshots || snapshots.length === 0) {
+        sectionEl.innerHTML = `
+            <p style="color:#999;font-size:13px;">暂无版本快照</p>
+            <button onclick="createManualSnapshot()" style="margin-top:8px;font-size:12px;padding:4px 10px;">📷 手动创建快照</button>
+        `;
+        return;
+    }
+    
+    const canRollback = taskStatus !== 'approved' && taskStatus !== 'revoked';
+    const rollbackHint = !canRollback ? 
+        `<p style="font-size:11px;color:#999;margin-top:4px;">⚠️ 已${taskStatus === 'approved' ? '批准' : '撤销'}的任务不能回滚</p>` : '';
+    
+    const options = snapshots.map(s => 
+        `<option value="${s.version}">v${s.version} - ${snapTypeLabels[s.snapshot_type] || s.snapshot_type} (${snapStatusLabels[s.status] || s.status}) - ${s.created_at}</option>`
+    ).join('');
+    
+    let html = '';
+    html += `<p style="font-size:13px;color:#666;margin-bottom:8px;">共 ${snapshots.length} 个历史版本</p>`;
+    
+    html += '<div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap;">';
+    html += '<div style="flex:1;min-width:180px;">';
+    html += '<label style="font-size:12px;color:#666;">版本 A</label>';
+    html += `<select id="compare-version-a" onchange="onVersionSelectChange()" style="width:100%;padding:6px;font-size:12px;">${options}</select>`;
+    html += '</div>';
+    html += '<div style="display:flex;align-items:flex-end;padding-bottom:6px;"><span style="font-size:16px;">↔</span></div>';
+    html += '<div style="flex:1;min-width:180px;">';
+    html += '<label style="font-size:12px;color:#666;">版本 B</label>';
+    html += `<select id="compare-version-b" onchange="onVersionSelectChange()" style="width:100%;padding:6px;font-size:12px;">${options}</select>`;
+    html += '</div>';
+    html += '</div>';
+    
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">';
+    html += '<button onclick="compareCurrentVersions()" style="font-size:12px;padding:5px 12px;">🔍 对比差异</button>';
+    if (canRollback) {
+        html += '<button onclick="rollbackFromSelect()" class="btn-reject" style="font-size:12px;padding:5px 12px;">⏪ 回滚到版本 A</button>';
+    }
+    html += '<button onclick="createManualSnapshot()" style="font-size:12px;padding:5px 12px;">📷 保存快照</button>';
+    html += '</div>';
+    
+    html += rollbackHint;
+    
+    html += '<div id="compare-result" style="margin-top:10px;"></div>';
+    
+    sectionEl.innerHTML = html;
+    
+    if (snapshots.length >= 2) {
+        document.getElementById('compare-version-a').value = snapshots[1].version;
+        document.getElementById('compare-version-b').value = snapshots[0].version;
+    }
+}
+
+function onVersionSelectChange() {
+    const resultEl = document.getElementById('compare-result');
+    if (resultEl) {
+        resultEl.innerHTML = '';
+    }
+}
+
+async function compareCurrentVersions() {
+    const selA = document.getElementById('compare-version-a');
+    const selB = document.getElementById('compare-version-b');
+    if (!selA || !selB) return;
+    
+    const versionA = parseInt(selA.value);
+    const versionB = parseInt(selB.value);
+    
+    if (versionA === versionB) {
+        showToast('请选择两个不同的版本进行对比', 'warning');
+        return;
+    }
+    
+    const resultEl = document.getElementById('compare-result');
+    if (resultEl) {
+        resultEl.innerHTML = '<p style="font-size:13px;color:#999;">对比中...</p>';
+    }
+    
+    try {
+        const response = await fetch(
+            `${API_BASE}/tasks/${currentTaskId}/snapshots/compare?version_a=${versionA}&version_b=${versionB}`
+        );
+        if (!response.ok) {
+            throw new Error('对比失败');
+        }
+        const diff = await response.json();
+        renderComparisonResult(diff);
+    } catch (e) {
+        if (resultEl) {
+            resultEl.innerHTML = `<p style="color:#dc3545;font-size:13px;">对比失败: ${e.message}</p>`;
+        }
+        console.error(e);
+    }
+}
+
+function renderComparisonResult(diff) {
+    const resultEl = document.getElementById('compare-result');
+    if (!resultEl) return;
+    
+    const summary = diff.summary;
+    let html = '';
+    
+    html += '<div style="background:#f0f7ff;padding:10px;border-radius:6px;border-left:3px solid #007bff;margin-bottom:12px;">';
+    html += `<strong style="font-size:13px;">版本对比 v${diff.version_a} ↔ v${diff.version_b}</strong>`;
+    html += '<div style="font-size:12px;color:#555;margin-top:4px;">';
+    html += `孔位: +${summary.wells_added} / -${summary.wells_removed} / ~${summary.wells_modified} &nbsp;|&nbsp; `;
+    html += `试剂: +${summary.reagents_added} / -${summary.reagents_removed} / ~${summary.reagents_modified} &nbsp;|&nbsp; `;
+    html += `引物: +${summary.primers_added} / -${summary.primers_removed} / ~${summary.primers_modified}`;
+    html += '</div></div>';
+    
+    const taskDiffs = diff.task_differences || {};
+    const templateDiffs = diff.template_differences || {};
+    if (Object.keys(taskDiffs).length > 0 || Object.keys(templateDiffs).length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += '<h5 style="font-size:13px;margin:0 0 6px 0;color:#333;">📋 基本信息差异</h5>';
+        html += '<table style="width:100%;font-size:12px;border-collapse:collapse;">';
+        html += '<thead><tr style="background:#f8f9fa;">';
+        html += '<th style="padding:6px;text-align:left;border-bottom:1px solid #ddd;">项目</th>';
+        html += `<th style="padding:6px;text-align:left;border-bottom:1px solid #ddd;">v${diff.version_a}</th>`;
+        html += `<th style="padding:6px;text-align:left;border-bottom:1px solid #ddd;">v${diff.version_b}</th>`;
+        html += '</tr></thead><tbody>';
+        
+        for (const [key, val] of Object.entries(taskDiffs)) {
+            const labelMap = {
+                'status': '状态',
+                'total_volume': '总体积',
+                'volume_unit': '体积单位',
+                'deviation_note': '偏差备注'
+            };
+            const label = labelMap[key] || key;
+            const oldVal = val.old !== null && val.old !== undefined ? val.old : '-';
+            const newVal = val.new !== null && val.new !== undefined ? val.new : '-';
+            const statusLabel = (v) => v && snapStatusLabels[v] ? snapStatusLabels[v] : v;
+            html += '<tr>';
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;font-weight:500;">${label}</td>`;
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;color:#dc3545;">${statusLabel(oldVal)}</td>`;
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;color:#28a745;">${statusLabel(newVal)}</td>`;
+            html += '</tr>';
+        }
+        
+        for (const [key, val] of Object.entries(templateDiffs)) {
+            const labelMap = { 'template_name': '模板名称' };
+            const label = labelMap[key] || key;
+            html += '<tr>';
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;font-weight:500;">${label}</td>`;
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;color:#dc3545;">${val.old || '-'}</td>`;
+            html += `<td style="padding:5px;border-bottom:1px solid #eee;color:#28a745;">${val.new || '-'}</td>`;
+            html += '</tr>';
+        }
+        
+        html += '</tbody></table>';
+        html += '</div>';
+    }
+    
+    const wellDiffs = diff.well_differences || {};
+    if (wellDiffs.added && wellDiffs.added.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">➕ 新增孔位 (${wellDiffs.added.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">v${diff.version_b} 新增: ${wellDiffs.added.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+        html += '</div>';
+    }
+    if (wellDiffs.removed && wellDiffs.removed.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">➖ 删除孔位 (${wellDiffs.removed.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">v${diff.version_b} 删除: ${wellDiffs.removed.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+        html += '</div>';
+    }
+    if (wellDiffs.modified && wellDiffs.modified.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">✏️ 修改孔位 (${wellDiffs.modified.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">${wellDiffs.modified.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+        html += '</div>';
+    }
+    
+    const reagentDiffs = diff.reagent_differences || {};
+    if (reagentDiffs.added && reagentDiffs.added.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">💧 新增试剂 (${reagentDiffs.added.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">${reagentDiffs.added.map(r => r.reagent_name).join(', ')}</p>`;
+        html += '</div>';
+    }
+    if (reagentDiffs.modified && reagentDiffs.modified.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">💧 试剂用量变化 (${reagentDiffs.modified.length})</h5>`;
+        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        html += '<tr><th style="padding:4px;text-align:left;">试剂</th><th style="padding:4px;text-align:right;">v' + diff.version_a + '</th><th style="padding:4px;text-align:right;">v' + diff.version_b + '</th></tr>';
+        reagentDiffs.modified.forEach(r => {
+            html += `<tr><td style="padding:3px;">${r.reagent_name}</td>`;
+            html += `<td style="padding:3px;text-align:right;color:#dc3545;">${r.old.used_volume} ${r.old.used_volume_unit}</td>`;
+            html += `<td style="padding:3px;text-align:right;color:#28a745;">${r.new.used_volume} ${r.new.used_volume_unit}</td></tr>`;
+        });
+        html += '</table></div>';
+    }
+    if (reagentDiffs.removed && reagentDiffs.removed.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">💧 删除试剂 (${reagentDiffs.removed.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">${reagentDiffs.removed.map(r => r.reagent_name).join(', ')}</p>`;
+        html += '</div>';
+    }
+    
+    const primerDiffs = diff.primer_differences || {};
+    if (primerDiffs.added && primerDiffs.added.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">🧪 新增引物 (${primerDiffs.added.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">${primerDiffs.added.map(p => p.primer_name).join(', ')}</p>`;
+        html += '</div>';
+    }
+    if (primerDiffs.modified && primerDiffs.modified.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">🧪 引物用量变化 (${primerDiffs.modified.length})</h5>`;
+        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        html += '<tr><th style="padding:4px;text-align:left;">引物</th><th style="padding:4px;text-align:right;">v' + diff.version_a + '</th><th style="padding:4px;text-align:right;">v' + diff.version_b + '</th></tr>';
+        primerDiffs.modified.forEach(p => {
+            html += `<tr><td style="padding:3px;">${p.primer_name}</td>`;
+            html += `<td style="padding:3px;text-align:right;color:#dc3545;">${p.old.used_volume} ${p.old.used_volume_unit}</td>`;
+            html += `<td style="padding:3px;text-align:right;color:#28a745;">${p.new.used_volume} ${p.new.used_volume_unit}</td></tr>`;
+        });
+        html += '</table></div>';
+    }
+    if (primerDiffs.removed && primerDiffs.removed.length > 0) {
+        html += '<div style="margin-bottom:10px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">🧪 删除引物 (${primerDiffs.removed.length})</h5>`;
+        html += `<p style="font-size:11px;color:#666;">${primerDiffs.removed.map(p => p.primer_name).join(', ')}</p>`;
+        html += '</div>';
+    }
+    
+    if (summary.wells_added === 0 && summary.wells_removed === 0 && summary.wells_modified === 0 &&
+        summary.reagents_added === 0 && summary.reagents_removed === 0 && summary.reagents_modified === 0 &&
+        summary.primers_added === 0 && summary.primers_removed === 0 && summary.primers_modified === 0 &&
+        Object.keys(taskDiffs).length === 0 && Object.keys(templateDiffs).length === 0) {
+        html += '<p style="color:#28a745;font-size:13px;text-align:center;padding:15px;background:#f0fff4;border-radius:6px;">✅ 两个版本完全相同，无差异</p>';
+    }
+    
+    resultEl.innerHTML = html;
+}
+
+async function rollbackFromSelect() {
+    const selA = document.getElementById('compare-version-a');
+    if (!selA) return;
+    
+    const version = parseInt(selA.value);
+    if (!confirm(`确定要回滚到版本 v${version} 吗？\n回滚后当前状态会保存为新快照，不会丢失。`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${currentTaskId}/snapshots/rollback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version, operator: 'user' })
+        });
+        
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || '回滚失败');
+        }
+        
+        const result = await response.json();
+        showToast(`已回滚到版本 v${version}`, 'success');
+        
+        showTaskDetail(currentTaskId);
+        loadTasks();
+    } catch (e) {
+        showToast(`回滚失败: ${e.message}`, 'error');
+        console.error(e);
+    }
+}
+
+async function createManualSnapshot() {
+    const note = prompt('请输入快照备注（可选）:', '');
+    if (note === null) return;
+    
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${currentTaskId}/snapshots`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: note || '' })
+        });
+        
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || '创建快照失败');
+        }
+        
+        const result = await response.json();
+        showToast(`已创建快照 v${result.version}`, 'success');
+        
+        loadTaskSnapshots(currentTaskId, currentTaskStatus ? currentTaskStatus : 'draft');
+    } catch (e) {
+        showToast(`创建快照失败: ${e.message}`, 'error');
+        console.error(e);
+    }
 }
 
 function showCreateTaskModal() {

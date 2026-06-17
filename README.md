@@ -341,6 +341,7 @@ zgw-00139/
 - `plate_templates` / `template_wells`：板位模板
 - `tasks` / `task_wells`：任务与孔位数据
 - `task_reagent_usage` / `task_primer_usage`：试剂/引物使用记录
+- `task_snapshots`：任务版本快照（含完整状态、孔位、用量）
 - `history`：操作历史
 - `reagent_inventory_log` / `primer_inventory_log`：库存变更日志
 

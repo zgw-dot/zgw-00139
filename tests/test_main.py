@@ -111,6 +111,9 @@ def run_tests():
         test_snapshot_persistence(db, test_app, db_path, test_results)
         test_snapshot_e2e_rollback_regenerate_approve(db, test_app, test_results)
         test_snapshot_history_records(db, test_app, test_results)
+        test_snapshot_frontend_api_contract(db, test_app, test_results)
+        test_snapshot_rollback_status_block_api(db, test_app, test_results)
+        test_snapshot_compare_same_version_and_detail(db, test_app, test_results)
     
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -3261,6 +3264,275 @@ def test_snapshot_history_records(db, app, results):
         import traceback as _tb
         _tb.print_exc()
         results.append({'name': '快照操作历史记录', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_frontend_api_contract(db, app, results):
+    print("\n--- 测试35: 前端API契约 - 页面交互接口联动 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_前端契约测试_快照API',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        snap_service.create_snapshot(task_id, 'manual', '初始草稿快照')
+
+        gen_result = service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        list_resp = client.get(f'/api/tasks/{task_id}/snapshots')
+        assert list_resp.status_code == 200, f"快照列表API失败: {list_resp.status_code}"
+        snap_list = list_resp.get_json()
+        assert isinstance(snap_list, list), "快照列表应为数组"
+        assert len(snap_list) >= 2, f"至少2个快照，实际{len(snap_list)}"
+
+        required_fields = ['id', 'version', 'snapshot_type', 'status', 'task_id',
+                           'template_id', 'template_name', 'total_volume', 'volume_unit',
+                           'well_count', 'created_at', 'note']
+        for s in snap_list:
+            for f in required_fields:
+                assert f in s, f"快照列表缺少字段: {f}"
+        print(f"  ① 快照列表API: {len(snap_list)} 个快照，字段完整")
+
+        assert snap_list[0]['version'] > snap_list[1]['version'], "快照列表应按版本倒序"
+        print(f"  ② 倒序排列正确: v{snap_list[0]['version']} > v{snap_list[1]['version']}")
+
+        compare_resp = client.get(
+            f'/api/tasks/{task_id}/snapshots/compare?version_a=1&version_b=2'
+        )
+        assert compare_resp.status_code == 200
+        diff = compare_resp.get_json()
+
+        diff_required = ['version_a', 'version_b', 'summary', 'task_differences',
+                         'template_differences', 'well_differences',
+                         'reagent_differences', 'primer_differences']
+        for f in diff_required:
+            assert f in diff, f"对比结果缺少字段: {f}"
+
+        summary_fields = ['wells_added', 'wells_removed', 'wells_modified',
+                          'reagents_added', 'reagents_removed', 'reagents_modified',
+                          'primers_added', 'primers_removed', 'primers_modified']
+        for f in summary_fields:
+            assert f in diff['summary'], f"对比summary缺少字段: {f}"
+        print(f"  ③ 对比API字段完整: wells +{diff['summary']['wells_added']}/-{diff['summary']['wells_removed']}")
+
+        manual_resp = client.post(
+            f'/api/tasks/{task_id}/snapshots',
+            json={'note': '手动快照_前端测试'}
+        )
+        assert manual_resp.status_code == 201
+        manual_data = manual_resp.get_json()
+        assert 'version' in manual_data
+        assert 'snapshot_type' in manual_data
+        assert manual_data['snapshot_type'] == 'manual'
+        print(f"  ④ 手动创建快照API: v{manual_data['version']}")
+
+        rollback_resp = client.post(
+            f'/api/tasks/{task_id}/snapshots/rollback',
+            json={'version': 1, 'operator': 'tester'}
+        )
+        assert rollback_resp.status_code == 200
+        rollback_data = rollback_resp.get_json()
+        rollback_fields = ['rolled_back_to', 'previous_status', 'new_status', 'task_id']
+        for f in rollback_fields:
+            assert f in rollback_data, f"回滚结果缺少字段: {f}"
+        print(f"  ⑤ 回滚API字段完整: rolled_back_to={rollback_data['rolled_back_to']}")
+
+        task_after = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        assert task_after['status'] == rollback_data['new_status'], "回滚后状态应一致"
+        print(f"  ⑥ 回滚后状态同步: {task_after['status']}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '前端API契约-页面交互接口联动', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '前端API契约-页面交互接口联动', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_rollback_status_block_api(db, app, results):
+    print("\n--- 测试36: 已批准/已撤销任务回滚拦截 API ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None
+
+        task_id = service.create_task(
+            name='_拦截测试_已批准回滚',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        snap_service.create_snapshot(task_id, 'manual', '草稿快照')
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        db.execute("UPDATE tasks SET status = 'approved' WHERE id = ?", (task_id,))
+        db.commit()
+
+        rollback_resp = client.post(
+            f'/api/tasks/{task_id}/snapshots/rollback',
+            json={'version': 1}
+        )
+        assert rollback_resp.status_code == 409, f"已批准任务回滚应返回409，实际{rollback_resp.status_code}"
+        err_data = rollback_resp.get_json()
+        assert 'error' in err_data, "错误响应应包含error字段"
+        print(f"  ① 已批准任务回滚拦截: {err_data['error'][:40]}...")
+
+        db.execute("UPDATE tasks SET status = 'revoked' WHERE id = ?", (task_id,))
+        db.commit()
+
+        rollback_resp2 = client.post(
+            f'/api/tasks/{task_id}/snapshots/rollback',
+            json={'version': 1}
+        )
+        assert rollback_resp2.status_code == 409
+        err_data2 = rollback_resp2.get_json()
+        assert 'error' in err_data2
+        print(f"  ② 已撤销任务回滚拦截: {err_data2['error'][:40]}...")
+
+        snaps_after = snap_service.list_snapshots(task_id)
+        v_count = len(snaps_after)
+        task_status = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()['status']
+        assert task_status == 'revoked', "拦截后任务状态不应改变"
+        print(f"  ③ 拦截后状态不变: status={task_status}, 快照数={v_count}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '已批准/已撤销任务回滚拦截API', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '已批准/已撤销任务回滚拦截API', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_compare_same_version_and_detail(db, app, results):
+    print("\n--- 测试37: 快照对比边界场景 & 快照详情 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+
+        task_id = service.create_task(
+            name='_对比边界测试_快照详情',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        snap_service.create_snapshot(task_id, 'manual', 'snap1')
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        same_resp = client.get(
+            f'/api/tasks/{task_id}/snapshots/compare?version_a=1&version_b=1'
+        )
+        assert same_resp.status_code == 200
+        same_diff = same_resp.get_json()
+        s = same_diff['summary']
+        assert s['wells_added'] == 0 and s['wells_removed'] == 0 and s['wells_modified'] == 0
+        assert s['reagents_added'] == 0 and s['reagents_removed'] == 0
+        assert s['primers_added'] == 0 and s['primers_removed'] == 0
+        print(f"  ① 同版本对比: 所有差异为0")
+
+        detail_resp = client.get(f'/api/tasks/{task_id}/snapshots/1')
+        assert detail_resp.status_code == 200
+        detail = detail_resp.get_json()
+        detail_required = ['id', 'version', 'snapshot_type', 'status', 'task_id',
+                           'task_data', 'wells_data', 'reagent_usage_data', 'primer_usage_data']
+        for f in detail_required:
+            assert f in detail, f"快照详情缺少字段: {f}"
+        assert isinstance(detail['wells_data'], list), "wells_data 应为列表"
+        print(f"  ② 快照详情API字段完整: wells_data({len(detail['wells_data'])} 条)")
+
+        invalid_resp = client.get(
+            f'/api/tasks/{task_id}/snapshots/compare?version_a=999&version_b=1'
+        )
+        assert invalid_resp.status_code in [400, 404], f"无效版本应返回错误，实际{invalid_resp.status_code}"
+        print(f"  ③ 无效版本对比错误处理: status={invalid_resp.status_code}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '快照对比边界&详情API', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '快照对比边界&详情API', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 
