@@ -314,7 +314,20 @@ async function loadTasks() {
             'revoked': '已撤销'
         };
         
-        listEl.innerHTML = data.map(t => `
+        listEl.innerHTML = data.map(t => {
+            let actionButtons = `
+                    <button class="btn-small" onclick="event.stopPropagation(); showTaskDetail(${t.id})" title="查看任务详情">👁 查看</button>
+            `;
+            if (t.status === 'draft' || t.status === 'rejected') {
+                actionButtons += `
+                    <button class="btn-small btn-primary" onclick="event.stopPropagation(); openTaskAndGenerate(${t.id})" title="生成配液方案">🔬 生成方案</button>
+                `;
+            }
+            actionButtons += `
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(${t.id})" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(${t.id})" title="导出方案 JSON">📤 导出</button>
+            `;
+            return `
             <div class="task-card status-${t.status}">
                 <div onclick="showTaskDetail(${t.id})">
                     <h3>${t.name}</h3>
@@ -326,14 +339,22 @@ async function loadTasks() {
                     ${t.deviation_note ? `<div style="margin-top:8px;color:#ffc107;font-size:13px;">📝 有偏差备注</div>` : ''}
                 </div>
                 <div class="task-card-actions">
-                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(${t.id})" title="复制为新草稿">📋 复制</button>
-                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(${t.id})" title="导出方案 JSON">📤 导出</button>
+                    ${actionButtons}
                 </div>
             </div>
-        `).join('');
+        `}).join('');
     } catch (e) {
         console.error(e);
     }
+}
+
+async function openTaskAndGenerate(taskId) {
+    await showTaskDetail(taskId);
+    setTimeout(() => {
+        const genBtn = Array.from(document.querySelectorAll('#task-detail-content button'))
+            .find(b => b.textContent.includes('生成方案'));
+        if (genBtn) genBtn.click();
+    }, 300);
 }
 
 async function showTaskDetail(taskId) {
@@ -360,7 +381,7 @@ async function showTaskDetail(taskId) {
         if (data.task.status === 'pending_review') {
             html += '<button class="btn-approve" onclick="approveTask()">✓ 批准</button>';
             html += '<button class="btn-reject" onclick="rejectTask()">✗ 驳回</button>';
-            html += '<button class="btn-deviation" onclick="addDeviationNote()">📝 偏差备注</button>';
+            html += '<button class="btn-deviation" onclick="addDeviationNote()">📝 添加偏差备注</button>';
         }
         if (data.task.status === 'approved') {
             html += '<button class="btn-revoke" onclick="revokeTask()">↶ 撤销确认</button>';

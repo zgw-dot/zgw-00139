@@ -115,6 +115,7 @@ def run_tests():
         test_snapshot_rollback_status_block_api(db, test_app, test_results)
         test_snapshot_compare_same_version_and_detail(db, test_app, test_results)
         test_snapshot_compare_data_structure(db, test_app, test_results)
+        test_readme_ui_entrypoint_contract(db, test_app, test_results)
     
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -3645,6 +3646,75 @@ def test_snapshot_compare_data_structure(db, app, results):
         import traceback as _tb
         _tb.print_exc()
         results.append({'name': '对比API数据结构契约(前端解析依赖)', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_readme_ui_entrypoint_contract(db, app, results):
+    print("\n--- 测试39: README与GUI入口按钮名称一致性 ---")
+    try:
+        import os as _os
+        static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'static', 'js')
+        js_path = _os.path.join(static_dir, 'app.js')
+        assert _os.path.exists(js_path), f'app.js 不存在: {js_path}'
+        with open(js_path, 'r', encoding='utf-8') as f:
+            js = f.read()
+
+        # README 步骤3: 草稿卡片应有"生成方案"按钮
+        assert '生成方案' in js, "前端JS应包含'生成方案'按钮文案(README步骤3)"
+        # README 步骤4: 所有卡片应有"查看"按钮
+        assert '👁 查看' in js or '查看任务详情' in js, "前端JS应包含'查看'按钮文案(README步骤4)"
+        # README 步骤4: 详情页应有"批准"按钮
+        assert '✓ 批准' in js or '批准' in js, "前端JS应包含'批准'按钮文案(README步骤4)"
+        # README 步骤4: 详情页应有"添加偏差备注"按钮
+        assert '添加偏差备注' in js, "前端JS应包含'添加偏差备注'按钮文案(README步骤4)"
+        # README 步骤5: 详情页应有"导出报告"按钮
+        assert '导出报告' in js, "前端JS应包含'导出报告'按钮文案(README步骤5)"
+        # README 版本对比功能: 应有"对比差异"按钮
+        assert '对比差异' in js, "前端JS应包含'对比差异'按钮文案(README版本快照)"
+        # README 回滚功能: 应有"回滚到版本"按钮
+        assert '回滚到版本' in js, "前端JS应包含'回滚到版本'按钮文案(README回滚功能)"
+        # README 撤销: 已批准应有"撤销确认"按钮
+        assert '撤销确认' in js, "前端JS应包含'撤销确认'按钮文案(README撤销批准)"
+        # openTaskAndGenerate 辅助函数存在(从卡片直接生成方案)
+        assert 'function openTaskAndGenerate' in js or 'openTaskAndGenerate' in js, "应存在openTaskAndGenerate辅助函数"
+        print("  ① 前端JS按钮名称全部与README对齐")
+
+        # API 返回字段校验：任务列表返回 status，前端据此决定按钮显示
+        client = app.test_client()
+        r = client.get('/api/tasks')
+        assert r.status_code == 200
+        tasks = r.get_json()
+        assert isinstance(tasks, list), f'任务列表应为数组, 实际{type(tasks)}'
+        if tasks:
+            t = tasks[0]
+            for f in ['id', 'name', 'status', 'total_volume', 'volume_unit', 'created_at']:
+                assert f in t, f'任务列表缺少字段{f}'
+            assert t['status'] in ['draft', 'pending_review', 'approved', 'rejected', 'revoked'], f'状态值非法: {t["status"]}'
+            print("  ② 任务列表API字段完整(含status供前端渲染按钮)")
+
+        # README 文档校验
+        readme_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'README.md')
+        with open(readme_path, 'r', encoding='utf-8') as f:
+            readme = f.read()
+        # README 里写的按钮名必须在前端代码里存在
+        readme_buttons = [
+            ('查看', '👁 查看'),
+            ('生成方案', '🔬 生成方案'),
+            ('批准', '✓ 批准'),
+            ('添加偏差备注', '📝 添加偏差备注'),
+            ('导出报告', '📊 导出报告'),
+        ]
+        for doc_name, js_name in readme_buttons:
+            assert doc_name in readme, f'README应提及按钮"{doc_name}"'
+            assert js_name in js or (doc_name in js and doc_name != '查看'), f'前端JS应实现按钮"{doc_name}"(JS名:{js_name})'
+        print("  ③ README文档按钮名与前端JS实现一一对应")
+
+        results.append({'name': 'README与GUI入口按钮名称一致性', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': 'README与GUI入口按钮名称一致性', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 
