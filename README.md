@@ -23,6 +23,15 @@
 - 库存扣减来源追踪
 - 重启后数据一致性保证（SQLite 持久化）
 
+### 版本快照与回滚
+- **自动快照**：生成方案、导入方案、复制成草稿、批准前自动保存可追溯快照
+- **版本列表**：任务详情页查看所有历史版本，含版本号、快照类型、状态、时间
+- **版本对比**：对比任意两个版本的模板、总体积、孔位、引物/试剂用量和状态差异
+- **回滚功能**：未批准任务可回滚到任意历史快照；已批准或已撤销任务禁止回滚，返回明确错误
+- **持久化存储**：快照写入 SQLite，服务重启后仍可查看和回滚
+- **导出导入**：导出的任务 JSON 包含快照摘要；导入时校验版本兼容性，遇不支持版本/重名/快照引用缺失整体拒绝，无脏数据残留
+- **历史审计**：快照创建、版本对比、回滚操作、导入失败均写入历史记录
+
 ## 技术栈
 
 - **后端**：Python 3 + Flask
@@ -187,21 +196,21 @@ curl -X POST http://localhost:5000/api/tasks/import?conflict_mode=rename \
 
 ### 验证命令
 
-运行完整测试套件（32 个测试用例）：
+运行完整测试套件（41 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell
-$env:PYTHONIOENCODING="utf-8" ; python tests/test_main.py
+$env:PYTHONIOENCODING="utf-8" ; python -m tests.test_main
 ```
 
 **Windows CMD：**
 ```cmd
-set PYTHONIOENCODING=utf-8 && python tests\test_main.py
+set PYTHONIOENCODING=utf-8 && python -m tests.test_main
 ```
 
 **Linux / macOS：**
 ```bash
-python tests/test_main.py
+python -m tests.test_main
 ```
 
 > 注意：Windows 默认控制台编码为 GBK，测试输出中的中文和 µ 字符需要 UTF-8 编码支持，否则会因编码错误中断。设置 `PYTHONIOENCODING=utf-8` 可确保输出正常。
@@ -232,7 +241,16 @@ python tests/test_main.py
 | 17 | 报告导出 | 配液报告导出 |
 | 18 | 库存不足拦截 | 库存不足时拦截，不预占库存 |
 | 19 | 用户链路端到端 | 导出 JSON → 重新导入 → 复制模板 → 建任务生成方案 → 冲突拒绝（5 步完整链路） |
-| 20 | 重启后数据一致性 | 模拟重启验证数据持久化、历史记录导出完整性 |
+| 20-25 | 任务复跑全链路 | 复制任务、JSON 导入导出、导入冲突、导入后审批、状态限制、复跑全链路、重启一致 |
+| 26 | 生成方案自动快照 | 生成配液方案后自动创建 generate 类型快照 |
+| 27 | 快照列表与版本对比 | 列出所有版本快照，对比两个版本差异 |
+| 28 | 快照回滚功能 | 回滚到指定版本，孔位/用量/状态完全恢复 |
+| 29 | 回滚状态校验 | 已批准/已撤销任务禁止回滚，返回 HTTP 409 |
+| 30 | 导出带快照摘要 & 导入还原 | 导出 JSON 含快照摘要，导入后还原历史快照 |
+| 31 | 导入冲突拦截 & 无脏数据 | 版本不支持/重名整体拒绝，失败不留半套数据 |
+| 32 | 快照数据持久化 | 重启后快照可读，数据完整 |
+| 33 | 端到端回滚重生成批准 | 草稿快照 → 生成 → 回滚 → 重生成 → 批准 完整链路 |
+| 34 | 快照操作历史记录 | 快照创建/对比/回滚/导入失败均写入 history
 
 ## CSV 数据格式
 
@@ -296,6 +314,7 @@ zgw-00139/
 │       ├── liquid_handling_engine.py  # 配液计算引擎
 │       ├── data_importer.py        # 数据导入
 │       ├── task_service.py         # 任务管理
+│       ├── snapshot_service.py     # 版本快照与回滚
 │       ├── history_service.py      # 历史记录
 │       └── report_service.py       # 报告生成
 ├── static/                   # 前端静态文件

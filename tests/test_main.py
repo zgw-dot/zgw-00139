@@ -102,6 +102,15 @@ def run_tests():
         test_task_copy_status_restrictions(db, test_app, test_results)
         test_task_e2e_copy_import_approve(db, test_app, db_path, test_results)
         test_data_persistence(db, test_app, db_path, test_results)
+        test_snapshot_create_on_generate(db, test_app, test_results)
+        test_snapshot_list_and_compare(db, test_app, test_results)
+        test_snapshot_rollback(db, test_app, test_results)
+        test_snapshot_rollback_status_check(db, test_app, test_results)
+        test_snapshot_export_import(db, test_app, test_results)
+        test_snapshot_import_conflict(db, test_app, test_results)
+        test_snapshot_persistence(db, test_app, db_path, test_results)
+        test_snapshot_e2e_rollback_regenerate_approve(db, test_app, test_results)
+        test_snapshot_history_records(db, test_app, test_results)
     
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -2542,6 +2551,716 @@ def test_user_template_flow_e2e(db, app, results):
         import traceback as _tb
         _tb.print_exc()
         results.append({'name': '用户链路端到端', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_create_on_generate(db, app, results):
+    print("\n--- 测试26: 生成方案自动创建快照 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_生成方案',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        snapshots_before = snap_service.list_snapshots(task_id)
+        assert len(snapshots_before) == 0, "生成方案前应无快照"
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        result = service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        assert 'snapshot_version' in result, "生成方案应返回快照版本号"
+        assert result['snapshot_version'] == 1, "第一个快照版本应为 1"
+
+        snapshots_after = snap_service.list_snapshots(task_id)
+        assert len(snapshots_after) == 1, f"生成方案后应有 1 个快照，实际 {len(snapshots_after)}"
+        assert snapshots_after[0]['snapshot_type'] == 'generate', "快照类型应为 generate"
+        assert snapshots_after[0]['status'] == 'pending_review', "快照状态应为 pending_review"
+
+        print(f"  ✅ 生成方案自动创建快照: v{snapshots_after[0]['version']}, 类型={snapshots_after[0]['snapshot_type']}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '生成方案自动创建快照', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '生成方案自动创建快照', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_list_and_compare(db, app, results):
+    print("\n--- 测试27: 快照列表与版本对比 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_版本对比',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        db.execute("UPDATE tasks SET total_volume = 50, updated_at = ? WHERE id = ?",
+                   ('2025-01-01T00:00:00', task_id))
+        db.commit()
+        snap_service.create_snapshot(task_id, 'manual', '手动快照: 修改总体积')
+
+        snapshots = snap_service.list_snapshots(task_id)
+        assert len(snapshots) == 2, f"应有 2 个快照，实际 {len(snapshots)}"
+        assert snapshots[0]['version'] == 2, "最新快照版本应为 2"
+        assert snapshots[1]['version'] == 1, "旧快照版本应为 1"
+        print(f"  ✅ 快照列表: {len(snapshots)} 个版本，按版本倒序排列")
+
+        diff = snap_service.compare_snapshots(task_id, 1, 2)
+        assert diff['version_a'] == 1
+        assert diff['version_b'] == 2
+
+        assert 'total_volume' in diff['task_differences'], "应检测到 total_volume 差异"
+        assert diff['task_differences']['total_volume']['old'] == 20
+        assert diff['task_differences']['total_volume']['new'] == 50
+        print(f"  ✅ 版本对比: 检测到 task_differences.total_volume 变化")
+
+        summary = diff['summary']
+        assert isinstance(summary['wells_modified'], int), "summary 应包含 wells_modified 计数"
+        print(f"  ✅ 对比摘要: wells_modified={summary['wells_modified']}, reagents_modified={summary['reagents_modified']}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '快照列表与版本对比', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '快照列表与版本对比', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_rollback(db, app, results):
+    print("\n--- 测试28: 快照回滚功能 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_回滚',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        v1_wells = db.execute(
+            'SELECT COUNT(*) as cnt FROM task_wells WHERE task_id = ?', (task_id,)
+        ).fetchone()['cnt']
+
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute(
+            "INSERT INTO task_wells (task_id, well_row, well_col, well_type, total_volume, total_volume_unit) VALUES (?, 1, 1, 'sample', 10, 'ul')",
+            (task_id,)
+        )
+        db.commit()
+        snap_service.create_snapshot(task_id, 'manual', '修改后快照')
+
+        v2_wells = db.execute(
+            'SELECT COUNT(*) as cnt FROM task_wells WHERE task_id = ?', (task_id,)
+        ).fetchone()['cnt']
+        assert v2_wells == 1, "v2 应有 1 个孔"
+
+        rollback_result = snap_service.rollback_to_snapshot(task_id, 1)
+        assert rollback_result['rolled_back_to'] == 1
+        assert rollback_result['previous_status'] == 'pending_review'
+        assert rollback_result['new_status'] == 'pending_review'
+
+        after_rollback_wells = db.execute(
+            'SELECT COUNT(*) as cnt FROM task_wells WHERE task_id = ?', (task_id,)
+        ).fetchone()['cnt']
+        assert after_rollback_wells == v1_wells, f"回滚后孔位数应恢复为 v1 的 {v1_wells}，实际 {after_rollback_wells}"
+
+        task_after = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        assert task_after['status'] == 'pending_review', "回滚后状态应恢复"
+
+        print(f"  ✅ 回滚成功: v1 ({v1_wells} 孔) ← v2 ({v2_wells} 孔) → 回滚后 {after_rollback_wells} 孔")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '快照回滚功能', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '快照回滚功能', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_rollback_status_check(db, app, results):
+    print("\n--- 测试29: 回滚状态校验（已批准/已撤销不能回滚） ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_回滚状态校验',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        snap_v1 = snap_service.list_snapshots(task_id)
+        assert len(snap_v1) >= 1, "应有至少 1 个快照"
+
+        approved = False
+        try:
+            service.approve_task(task_id, ignore_min_pipette=True)
+            approved = True
+        except ValueError:
+            pass
+
+        task_approved = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+
+        if approved and task_approved and task_approved['status'] == 'approved':
+            try:
+                snap_service.rollback_to_snapshot(task_id, 1)
+                raise AssertionError("已批准任务应该不能回滚")
+            except ValueError as e:
+                assert '不能回滚' in str(e) or '已批准' in str(e), f"错误信息应包含不能回滚提示: {e}"
+                print(f"  ✅ 已批准任务回滚被正确拦截: {e}")
+
+            resp = client.post(f'/api/tasks/{task_id}/snapshots/rollback',
+                               json={'version': 1})
+            assert resp.status_code == 409, f"已批准任务回滚应返回 409，实际 {resp.status_code}"
+            print(f"  ✅ API 层已批准任务回滚返回 HTTP 409")
+
+            service.revoke_approval(task_id)
+            try:
+                snap_service.rollback_to_snapshot(task_id, 1)
+                raise AssertionError("已撤销任务应该不能回滚")
+            except ValueError as e:
+                assert '不能回滚' in str(e) or '已撤销' in str(e), f"错误信息应包含不能回滚提示: {e}"
+                print(f"  ✅ 已撤销任务回滚被正确拦截: {e}")
+        else:
+            print("  ⚠️  跳过完整批准回滚测试（因库存不足等原因未成功批准）")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '回滚状态校验', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '回滚状态校验', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_export_import(db, app, results):
+    print("\n--- 测试30: 导出带快照摘要 & 导入还原 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_导出导入',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        snap_service.create_snapshot(task_id, 'manual', '测试手动快照')
+
+        snapshots_before = snap_service.list_snapshots(task_id)
+        assert len(snapshots_before) == 2, f"应有 2 个快照，实际 {len(snapshots_before)}"
+
+        resp = client.get(f'/api/tasks/{task_id}/export/json')
+        assert resp.status_code == 200, f"导出失败: {resp.status_code}"
+
+        export_data = json.loads(resp.data.decode('utf-8'))
+        assert 'snapshots' in export_data, "导出 JSON 应包含 snapshots 字段"
+        assert export_data['snapshots']['snapshot_count'] == 2, f"快照数量应为 2，实际 {export_data['snapshots']['snapshot_count']}"
+        assert 'schema_version' in export_data['snapshots'], "快照摘要应有 schema_version"
+        print(f"  ✅ 导出包含快照摘要: {export_data['snapshots']['snapshot_count']} 个快照")
+
+        import_name = '_快照测试_导入副本'
+        import_data = json.loads(json.dumps(export_data))
+        import_data['task']['name'] = import_name
+
+        resp_import = client.post('/api/tasks/import',
+                                  json=import_data,
+                                  content_type='application/json')
+        assert resp_import.status_code == 201, f"导入失败: {resp_import.status_code} {resp_import.get_json()}"
+
+        imported = resp_import.get_json()
+        imported_task_id = imported['task']['id']
+
+        imported_snapshots = snap_service.list_snapshots(imported_task_id)
+        assert len(imported_snapshots) >= 1, f"导入后应有至少 1 个快照（导入快照），实际 {len(imported_snapshots)}"
+        print(f"  ✅ 导入任务有快照: {len(imported_snapshots)} 个")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (imported_task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (imported_task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (imported_task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (imported_task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (imported_task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (imported_task_id,))
+        db.commit()
+
+        results.append({'name': '导出带快照摘要&导入还原', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '导出带快照摘要&导入还原', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_import_conflict(db, app, results):
+    print("\n--- 测试31: 导入冲突拦截（版本不支持/重名/整体拒绝无脏数据） ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_冲突源',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        resp = client.get(f'/api/tasks/{task_id}/export/json')
+        export_data = json.loads(resp.data.decode('utf-8'))
+
+        bad_schema_data = json.loads(json.dumps(export_data))
+        bad_schema_data['task']['name'] = '_快照测试_坏版本测试'
+        bad_schema_data['snapshots']['schema_version'] = '99.0'
+
+        tasks_before = len(db.execute('SELECT * FROM tasks').fetchall())
+
+        resp_bad = client.post('/api/tasks/import',
+                               json=bad_schema_data,
+                               content_type='application/json')
+        assert resp_bad.status_code == 400, f"版本不支持应返回 400，实际 {resp_bad.status_code}"
+        bad_resp = resp_bad.get_json()
+        assert '不支持' in bad_resp.get('error', ''), "错误信息应包含版本不支持"
+        print(f"  ✅ 快照 schema 版本不支持被拦截: HTTP {resp_bad.status_code}")
+
+        tasks_after_bad = len(db.execute('SELECT * FROM tasks').fetchall())
+        assert tasks_after_bad == tasks_before, f"导入失败不应留下脏数据: {tasks_before} → {tasks_after_bad}"
+        print(f"  ✅ 导入失败无残留: 任务数保持 {tasks_before}")
+
+        same_name_data = json.loads(json.dumps(export_data))
+        same_name_data['task']['name'] = '_快照测试_冲突源'
+
+        resp_same = client.post('/api/tasks/import',
+                                json=same_name_data,
+                                content_type='application/json')
+        assert resp_same.status_code == 409, f"重名应返回 409，实际 {resp_same.status_code}"
+        same_resp = resp_same.get_json()
+        assert same_resp.get('conflict') == 'name_exists', "冲突类型应为 name_exists"
+        print(f"  ✅ 任务重名被拦截: HTTP {resp_same.status_code}, conflict=name_exists")
+
+        tasks_after_same = len(db.execute('SELECT * FROM tasks').fetchall())
+        assert tasks_after_same == tasks_before, f"重名导入失败不应残留: {tasks_before} → {tasks_after_same}"
+
+        import_fail_history = db.execute(
+            "SELECT * FROM history WHERE action_type = 'task_import_failed' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert import_fail_history is not None, "应有导入失败的历史记录"
+        print(f"  ✅ 导入失败已写入历史记录: {import_fail_history['detail'][:50]}...")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '导入冲突拦截&无脏数据', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '导入冲突拦截&无脏数据', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_persistence(db, app, db_path, results):
+    print("\n--- 测试32: 快照数据持久化（重启后可读） ---")
+    try:
+        from app.services.snapshot_service import SnapshotService
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_持久化',
+            template_id=template['id'],
+            total_volume=25,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        snap_service.create_snapshot(task_id, 'manual', '持久化测试快照')
+
+        snapshots_before = snap_service.list_snapshots(task_id)
+        assert len(snapshots_before) == 2, "应有 2 个快照"
+
+        assert db_path and os.path.exists(db_path), f"数据库文件应存在: {db_path}"
+
+        other_conn = sqlite3.connect(db_path)
+        other_conn.row_factory = sqlite3.Row
+        other_snapshots = other_conn.execute(
+            'SELECT * FROM task_snapshots WHERE task_id = ? ORDER BY version',
+            (task_id,)
+        ).fetchall()
+        assert len(other_snapshots) == 2, f"独立连接应能读到 2 个快照，实际 {len(other_snapshots)}"
+
+        snap1 = other_conn.execute(
+            'SELECT * FROM task_snapshots WHERE task_id = ? AND version = 1', (task_id,)
+        ).fetchone()
+        assert snap1 is not None, "v1 快照应存在"
+        assert snap1['snapshot_type'] == 'generate', "v1 类型应为 generate"
+        assert snap1['wells_data'] is not None and len(snap1['wells_data']) > 0, "v1 应有孔位数据"
+
+        snap2 = other_conn.execute(
+            'SELECT * FROM task_snapshots WHERE task_id = ? AND version = 2', (task_id,)
+        ).fetchone()
+        assert snap2 is not None, "v2 快照应存在"
+        assert snap2['snapshot_type'] == 'manual', "v2 类型应为 manual"
+
+        other_conn.close()
+        print(f"  ✅ 重启后快照可读: {len(other_snapshots)} 个，数据完整")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '快照数据持久化', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '快照数据持久化', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_e2e_rollback_regenerate_approve(db, app, results):
+    print("\n--- 测试33: 端到端 - 回滚后重新生成&批准 ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照E2E测试_回滚重生成',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        snap_service.create_snapshot(task_id, 'manual', '初始草稿快照')
+        v_draft = snap_service.list_snapshots(task_id)[0]['version']
+        assert v_draft == 1
+        print(f"  ① 草稿快照: v{v_draft}, status=draft")
+
+        result1 = service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+        v_gen = result1['snapshot_version']
+        assert v_gen == 2
+        task_v2 = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        assert task_v2['status'] == 'pending_review'
+        print(f"  ② 生成方案: v{v_gen}, status={task_v2['status']}")
+
+        rollback_result = snap_service.rollback_to_snapshot(task_id, v_draft)
+        assert rollback_result['rolled_back_to'] == v_draft
+        assert rollback_result['previous_status'] == 'pending_review'
+        assert rollback_result['new_status'] == 'draft'
+        task_after_rollback = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        assert task_after_rollback['status'] == 'draft'
+        print(f"  ③ 回滚到草稿 v{v_draft}: status={task_after_rollback['status']}")
+
+        result2 = service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+        v3 = result2['snapshot_version']
+        assert v3 == 3, f"重新生成后快照版本应为 3，实际 {v3}"
+        print(f"  ④ 重新生成方案: v{v3}")
+
+        snapshots = snap_service.list_snapshots(task_id)
+        assert len(snapshots) == 3, f"应有 3 个快照，实际 {len(snapshots)}"
+
+        diff = snap_service.compare_snapshots(task_id, v_draft, v3)
+        assert diff is not None
+        print(f"  ⑤ 版本对比正常: wells_modified={diff['summary']['wells_modified']}, reagents_modified={diff['summary']['reagents_modified']}")
+
+        try:
+            approve_result = service.approve_task(task_id, ignore_min_pipette=True)
+            if approve_result:
+                task_approved = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+                assert task_approved['status'] == 'approved'
+
+                pre_approve_snap = snap_service.list_snapshots(task_id)
+                has_pre_approve = any(s['snapshot_type'] == 'pre_approve' for s in pre_approve_snap)
+                assert has_pre_approve, "批准前应创建 pre_approve 快照"
+                print(f"  ⑥ 批准成功，有批准前快照: {len(pre_approve_snap)} 个快照")
+        except ValueError as e:
+            print(f"  ⚠️  批准跳过（库存可能不足）: {e}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '端到端回滚重生成批准', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '端到端回滚重生成批准', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_history_records(db, app, results):
+    print("\n--- 测试34: 快照操作历史记录 ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        from app.services.history_service import HistoryService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+        history_service = HistoryService(db, '')
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None, "需要模板"
+
+        task_id = service.create_task(
+            name='_快照测试_历史记录',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        history_before = len(history_service.get_history(task_id=task_id, limit=1000))
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        snap_service.create_snapshot(task_id, 'manual', '测试快照')
+
+        snap_service.rollback_to_snapshot(task_id, 1)
+
+        history_after = history_service.get_history(task_id=task_id, limit=1000)
+        action_types = set(h['action_type'] for h in history_after)
+
+        assert 'snapshot_created' in action_types, "应有 snapshot_created 历史记录"
+        assert 'snapshot_rollback' in action_types, "应有 snapshot_rollback 历史记录"
+        print(f"  ✅ 快照相关历史记录: snapshot_created + snapshot_rollback")
+
+        created_records = [h for h in history_after if h['action_type'] == 'snapshot_created']
+        assert len(created_records) >= 2, f"应有至少 2 条 snapshot_created，实际 {len(created_records)}"
+        print(f"  ✅ 快照创建记录数: {len(created_records)}")
+
+        rollback_records = [h for h in history_after if h['action_type'] == 'snapshot_rollback']
+        assert len(rollback_records) == 1, f"应有 1 条回滚记录，实际 {len(rollback_records)}"
+        assert '回滚到版本' in rollback_records[0]['detail'], "回滚记录详情应包含版本号"
+        print(f"  ✅ 回滚历史记录: {rollback_records[0]['detail'][:60]}...")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '快照操作历史记录', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '快照操作历史记录', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 

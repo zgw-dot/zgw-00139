@@ -161,6 +161,26 @@ def init_db(app):
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS task_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            snapshot_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            task_data TEXT NOT NULL,
+            wells_data TEXT NOT NULL,
+            reagent_usage_data TEXT NOT NULL,
+            primer_usage_data TEXT NOT NULL,
+            template_id INTEGER,
+            template_name TEXT,
+            total_volume REAL,
+            volume_unit TEXT,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id, version)
+        );
+
         CREATE TABLE IF NOT EXISTS reagent_inventory_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reagent_id INTEGER NOT NULL,

@@ -288,16 +288,21 @@ class TaskService:
             (datetime.now().isoformat(), task_id)
         )
         self.db.commit()
-        
-        self._add_history(task_id, 'generate', 'plan_generated', 
-                          f'生成配液方案，{len(template_wells)} 个孔位，{len(all_warnings)} 个警告')
-        
+
+        from app.services.snapshot_service import SnapshotService
+        snapshot_service = SnapshotService(self.db)
+        snapshot_info = snapshot_service.create_snapshot(task_id, 'generate', '生成配液方案')
+
+        self._add_history(task_id, 'generate', 'plan_generated',
+                          f'生成配液方案，{len(template_wells)} 个孔位，{len(all_warnings)} 个警告，快照 v{snapshot_info["version"]}')
+
         return {
             'task_id': task_id,
             'status': 'pending_review',
             'warnings': all_warnings,
             'below_min_pipette': below_min_pipette,
-            'reagent_usage': [{'name': v['name'], 'volume': v['volume'], 'unit': v['unit'], 'source': v['source']} 
+            'snapshot_version': snapshot_info['version'],
+            'reagent_usage': [{'name': v['name'], 'volume': v['volume'], 'unit': v['unit'], 'source': v['source']}
                              for v in reagent_usage.values()],
             'primer_usage': {'name': primer['name'], 'volume': primer_usage['total'], 'unit': 'ul'},
         }
@@ -306,9 +311,13 @@ class TaskService:
         task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
         if not task:
             raise ValueError('任务不存在')
-        
+
         if task['status'] != 'pending_review':
             raise ValueError('只有待复核状态的任务才能批准')
+
+        from app.services.snapshot_service import SnapshotService
+        snapshot_service = SnapshotService(self.db)
+        snapshot_info = snapshot_service.create_snapshot(task_id, 'pre_approve', '批准前快照')
         
         task_wells = self.db.execute(
             'SELECT * FROM task_wells WHERE task_id = ?', (task_id,)
@@ -721,44 +730,53 @@ class TaskService:
                 ))
         
         self.db.commit()
-        
-        self._add_history(new_task_id, 'copy', 'task_copied', 
-                          f'从任务 #{task_id} ({task["name"]}) 复制为新草稿')
-        self._add_history(task_id, 'copy', 'task_copied_from', 
+
+        from app.services.snapshot_service import SnapshotService
+        snapshot_service = SnapshotService(self.db)
+        snapshot_info = snapshot_service.create_snapshot(new_task_id, 'copy', f'从任务 #{task_id} 复制')
+
+        self._add_history(new_task_id, 'copy', 'task_copied',
+                          f'从任务 #{task_id} ({task["name"]}) 复制为新草稿，快照 v{snapshot_info["version"]}')
+        self._add_history(task_id, 'copy', 'task_copied_from',
                           f'被复制为新任务 #{new_task_id} ({final_name})')
-        
+
         return new_task_id
     
     def export_task_json(self, task_id):
         task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
         if not task:
             raise ValueError('任务不存在')
-        
+
         template = self.db.execute(
             'SELECT * FROM plate_templates WHERE id = ?', (task['template_id'],)
         ).fetchone()
-        
+
         task_wells = self.db.execute(
             'SELECT well_row, well_col, well_type, sample_name, note FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
             (task_id,)
         ).fetchall()
-        
+
         reagent_usage = self.db.execute(
             'SELECT reagent_name, source, used_volume, used_volume_unit FROM task_reagent_usage WHERE task_id = ?',
             (task_id,)
         ).fetchall()
-        
+
         primer_usage = self.db.execute(
             'SELECT primer_name, source, used_volume, used_volume_unit FROM task_primer_usage WHERE task_id = ?',
             (task_id,)
         ).fetchall()
-        
+
+        from app.services.snapshot_service import SnapshotService
+        snapshot_service = SnapshotService(self.db)
+        snapshots_summary = snapshot_service.get_snapshot_summary_for_export(task_id)
+
         export_data = {
-            'schema_version': '1.0',
+            'schema_version': '1.1',
             'task': {
                 'name': task['name'],
                 'total_volume': task['total_volume'],
                 'volume_unit': task['volume_unit'],
+                'status': task['status'],
             },
             'template': {
                 'name': template['name'] if template else None,
@@ -768,109 +786,123 @@ class TaskService:
             'wells': [dict(w) for w in task_wells],
             'reagent_usage': [dict(r) for r in reagent_usage],
             'primer_usage': [dict(p) for p in primer_usage],
+            'snapshots': snapshots_summary,
         }
-        
-        self._add_history(task_id, 'export', 'task_exported', 
-                          f'导出任务方案为 JSON: {task["name"]}')
-        
+
+        self._add_history(task_id, 'export', 'task_exported',
+                          f'导出任务方案为 JSON: {task["name"]}，包含 {snapshots_summary["snapshot_count"]} 个快照')
+
         return json.dumps(export_data, ensure_ascii=False, indent=2)
     
     def import_task_json(self, json_content, conflict_mode='reject'):
+        task_name = '未知任务'
         try:
-            data = json.loads(json_content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f'JSON 解析失败: {str(e)}')
-        
-        if not data.get('task'):
-            raise ValueError('JSON 缺少 task 字段')
-        if not data.get('template'):
-            raise ValueError('JSON 缺少 template 字段')
-        
-        task_name = data['task'].get('name', '导入任务')
-        total_volume = data['task'].get('total_volume')
-        volume_unit = data['task'].get('volume_unit', 'ul')
-        template_name = data['template'].get('name')
-        template_rows = data['template'].get('rows')
-        template_cols = data['template'].get('cols')
-        wells = data.get('wells', [])
-        reagent_usage = data.get('reagent_usage', [])
-        primer_usage = data.get('primer_usage', [])
-        
-        if total_volume is None:
-            raise ValueError('任务缺少 total_volume')
-        if not template_name:
-            raise ValueError('模板缺少 name')
-        if template_rows is None or template_cols is None:
-            raise ValueError('模板缺少 rows 或 cols')
-        
-        if not UnitConverter.is_volume_unit(volume_unit):
-            raise ValueError(f'无效的体积单位: {volume_unit}')
-        
-        template = self.db.execute(
-            'SELECT * FROM plate_templates WHERE name = ?', (template_name,)
-        ).fetchone()
-        
-        if not template:
-            raise ValueError(f'模板不存在: {template_name}。请先导入对应模板。')
-        
-        if template['rows'] != template_rows or template['cols'] != template_cols:
-            raise ValueError(
-                f'模板尺寸不匹配: 导入期望 {template_rows}×{template_cols}，'
-                f'实际模板 {template["rows"]}×{template["cols"]}'
+            try:
+                data = json.loads(json_content)
+            except json.JSONDecodeError as e:
+                raise ValueError(f'JSON 解析失败: {str(e)}')
+
+            if not data.get('task'):
+                raise ValueError('JSON 缺少 task 字段')
+            if not data.get('template'):
+                raise ValueError('JSON 缺少 template 字段')
+
+            from app.services.snapshot_service import SnapshotService
+            snapshot_service = SnapshotService(self.db)
+
+            task_name = data['task'].get('name', '导入任务')
+            total_volume = data['task'].get('total_volume')
+            volume_unit = data['task'].get('volume_unit', 'ul')
+            template_name = data['template'].get('name')
+            template_rows = data['template'].get('rows')
+            template_cols = data['template'].get('cols')
+            wells = data.get('wells', [])
+            reagent_usage = data.get('reagent_usage', [])
+            primer_usage = data.get('primer_usage', [])
+
+            check_name_dup = (conflict_mode == 'reject')
+            snapshot_errors = snapshot_service.validate_import_snapshots(
+                task_name, data, check_name_duplicate=check_name_dup
             )
-        
-        existing_task = self.db.execute(
-            'SELECT id FROM tasks WHERE name = ?', (task_name,)
-        ).fetchone()
-        
-        if existing_task:
-            if conflict_mode == 'reject':
-                raise ValueError(f'任务名称已存在: {task_name}')
-            elif conflict_mode == 'rename':
-                suffix = 2
-                while self.db.execute(
-                    'SELECT id FROM tasks WHERE name = ?', (f'{task_name}_{suffix}',)
-                ).fetchone():
-                    suffix += 1
-                task_name = f'{task_name}_{suffix}'
-            elif conflict_mode == 'overwrite':
-                raise ValueError('任务不支持覆盖模式，请使用 rename 或 reject')
-            else:
-                raise ValueError(f'无效的冲突处理模式: {conflict_mode}')
-        
-        missing_reagents = []
-        for usage in reagent_usage:
-            reagent = self.db.execute(
-                'SELECT * FROM reagents WHERE name = ?', (usage['reagent_name'],)
+            if snapshot_errors:
+                raise ValueError('导入校验失败: ' + '; '.join(snapshot_errors))
+
+            if total_volume is None:
+                raise ValueError('任务缺少 total_volume')
+            if not template_name:
+                raise ValueError('模板缺少 name')
+            if template_rows is None or template_cols is None:
+                raise ValueError('模板缺少 rows 或 cols')
+
+            if not UnitConverter.is_volume_unit(volume_unit):
+                raise ValueError(f'无效的体积单位: {volume_unit}')
+
+            template = self.db.execute(
+                'SELECT * FROM plate_templates WHERE name = ?', (template_name,)
             ).fetchone()
-            if not reagent:
-                missing_reagents.append(usage['reagent_name'])
-        
-        if missing_reagents:
-            raise ValueError(f'缺少试剂: {", ".join(missing_reagents)}。请先导入对应试剂。')
-        
-        missing_primers = []
-        for usage in primer_usage:
-            primer = self.db.execute(
-                'SELECT * FROM primers WHERE name = ?', (usage['primer_name'],)
+
+            if not template:
+                raise ValueError(f'模板不存在: {template_name}。请先导入对应模板。')
+
+            if template['rows'] != template_rows or template['cols'] != template_cols:
+                raise ValueError(
+                    f'模板尺寸不匹配: 导入期望 {template_rows}×{template_cols}，'
+                    f'实际模板 {template["rows"]}×{template["cols"]}'
+                )
+
+            existing_task = self.db.execute(
+                'SELECT id FROM tasks WHERE name = ?', (task_name,)
             ).fetchone()
-            if not primer:
-                missing_primers.append(usage['primer_name'])
-        
-        if missing_primers:
-            raise ValueError(f'缺少引物: {", ".join(missing_primers)}。请先导入对应引物。')
-        
-        try:
+
+            if existing_task:
+                if conflict_mode == 'reject':
+                    raise ValueError(f'任务名称已存在: {task_name}')
+                elif conflict_mode == 'rename':
+                    suffix = 2
+                    while self.db.execute(
+                        'SELECT id FROM tasks WHERE name = ?', (f'{task_name}_{suffix}',)
+                    ).fetchone():
+                        suffix += 1
+                    task_name = f'{task_name}_{suffix}'
+                elif conflict_mode == 'overwrite':
+                    raise ValueError('任务不支持覆盖模式，请使用 rename 或 reject')
+                else:
+                    raise ValueError(f'无效的冲突处理模式: {conflict_mode}')
+
+            missing_reagents = []
+            for usage in reagent_usage:
+                reagent = self.db.execute(
+                    'SELECT * FROM reagents WHERE name = ?', (usage['reagent_name'],)
+                ).fetchone()
+                if not reagent:
+                    missing_reagents.append(usage['reagent_name'])
+
+            if missing_reagents:
+                raise ValueError(f'缺少试剂: {", ".join(missing_reagents)}。请先导入对应试剂。')
+
+            missing_primers = []
+            for usage in primer_usage:
+                primer = self.db.execute(
+                    'SELECT * FROM primers WHERE name = ?', (usage['primer_name'],)
+                ).fetchone()
+                if not primer:
+                    missing_primers.append(usage['primer_name'])
+
+            if missing_primers:
+                raise ValueError(f'缺少引物: {", ".join(missing_primers)}。请先导入对应引物。')
+
+            self.db.execute('BEGIN')
+
             cursor = self.db.execute(
                 'INSERT INTO tasks (name, template_id, total_volume, volume_unit, status) VALUES (?, ?, ?, ?, ?)',
                 (task_name, template['id'], total_volume, volume_unit, 'draft')
             )
             new_task_id = cursor.lastrowid
-            
+
             if wells:
                 for well in wells:
                     self.db.execute('''
-                        INSERT INTO task_wells 
+                        INSERT INTO task_wells
                         (task_id, well_row, well_col, well_type, sample_name, note)
                         VALUES (?, ?, ?, ?, ?, ?)
                     ''', (
@@ -881,7 +913,7 @@ class TaskService:
                         well.get('sample_name'),
                         well.get('note', '')
                     ))
-            
+
             if reagent_usage:
                 for usage in reagent_usage:
                     reagent = self.db.execute(
@@ -897,7 +929,7 @@ class TaskService:
                             usage.get('used_volume_unit', 'ul'),
                             usage.get('source', '')
                         ))
-            
+
             if primer_usage:
                 for usage in primer_usage:
                     primer = self.db.execute(
@@ -913,13 +945,21 @@ class TaskService:
                             usage.get('used_volume_unit', 'ul'),
                             usage.get('source', '')
                         ))
-            
+
             self.db.commit()
-            
-            self._add_history(new_task_id, 'import', 'task_imported', 
-                              f'从 JSON 导入任务: {task_name}')
-            
+
+            snapshot_info = snapshot_service.create_snapshot(new_task_id, 'import', '从 JSON 导入任务')
+            imported_snap_count = snapshot_service.import_snapshots(new_task_id, data)
+
+            self._add_history(new_task_id, 'import', 'task_imported',
+                              f'从 JSON 导入任务: {task_name}，导入 {imported_snap_count} 个历史快照，当前快照 v{snapshot_info["version"]}')
+
             return new_task_id
         except Exception as e:
-            self.db.rollback()
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+            self._add_history(None, 'import', 'task_import_failed',
+                              f'导入任务失败: {task_name}，原因: {str(e)}')
             raise e

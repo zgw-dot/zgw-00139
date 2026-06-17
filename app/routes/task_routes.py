@@ -253,5 +253,100 @@ def import_task():
             response['conflict'] = conflict_type
         if existing_id:
             response['existing_id'] = existing_id
-        
+
         return jsonify(response), status_code
+
+
+@task_bp.route('/<int:task_id>/snapshots', methods=['GET'])
+def list_snapshots(task_id):
+    from app.database import get_db
+    from app.services.snapshot_service import SnapshotService
+
+    db = get_db(current_app)
+    service = SnapshotService(db)
+
+    try:
+        snapshots = service.list_snapshots(task_id)
+        return jsonify(snapshots)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@task_bp.route('/<int:task_id>/snapshots/<int:version>', methods=['GET'])
+def get_snapshot(task_id, version):
+    from app.database import get_db
+    from app.services.snapshot_service import SnapshotService
+
+    db = get_db(current_app)
+    service = SnapshotService(db)
+
+    try:
+        snapshot = service.get_snapshot_by_version(task_id, version)
+        return jsonify(snapshot)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@task_bp.route('/<int:task_id>/snapshots/compare', methods=['GET'])
+def compare_snapshots(task_id):
+    from app.database import get_db
+    from app.services.snapshot_service import SnapshotService
+
+    db = get_db(current_app)
+    service = SnapshotService(db)
+
+    version_a = request.args.get('version_a', type=int)
+    version_b = request.args.get('version_b', type=int)
+
+    if version_a is None or version_b is None:
+        return jsonify({'error': '需要提供 version_a 和 version_b 参数'}), 400
+
+    try:
+        diff = service.compare_snapshots(task_id, version_a, version_b)
+        return jsonify(diff)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@task_bp.route('/<int:task_id>/snapshots/rollback', methods=['POST'])
+def rollback_snapshot(task_id):
+    from app.database import get_db
+    from app.services.snapshot_service import SnapshotService
+
+    db = get_db(current_app)
+    service = SnapshotService(db)
+
+    data = request.get_json() or {}
+    version = data.get('version')
+    operator = data.get('operator', 'user')
+
+    if version is None:
+        return jsonify({'error': '需要提供 version 参数'}), 400
+
+    try:
+        result = service.rollback_to_snapshot(task_id, version, operator=operator)
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        status_code = 400
+        if '不能回滚' in error_msg or '已批准' in error_msg or '已撤销' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code
+
+
+@task_bp.route('/<int:task_id>/snapshots', methods=['POST'])
+def create_snapshot_manually(task_id):
+    from app.database import get_db
+    from app.services.snapshot_service import SnapshotService
+
+    db = get_db(current_app)
+    service = SnapshotService(db)
+
+    data = request.get_json() or {}
+    note = data.get('note', '')
+
+    try:
+        result = service.create_snapshot(task_id, 'manual', note=note)
+        return jsonify(result), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
