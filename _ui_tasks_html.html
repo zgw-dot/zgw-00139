@@ -1,0 +1,350 @@
+
+                <div class="task-section">
+                    <div class="task-header">
+                        <h2>任务管理</h2>
+                        <div class="task-filters">
+                            <select id="task-status-filter" onchange="loadTasks()">
+                                <option value="">全部状态</option>
+                                <option value="draft">草稿</option>
+                                <option value="pending_review">待复核</option>
+                                <option value="approved">已批准</option>
+                                <option value="rejected">已驳回</option>
+                                <option value="revoked">已撤销</option>
+                            </select>
+                            <input type="file" id="task-import-file" accept=".json" style="display: none;" onchange="importTaskFile(event)">
+                            <button onclick="document.getElementById('task-import-file').click()">📥 导入方案</button>
+                            <button class="btn-primary" onclick="showCreateTaskModal()">+ 新建任务</button>
+                        </div>
+                    </div>
+
+                    <div id="task-list" class="task-list">
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(24)">
+                    <h3>ui_review2_baa680f4</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 22:18:17</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(24)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(24)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(23)">
+                    <h3>ui_review_83e76d03_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 22:17:13</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(23)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(23)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-approved">
+                <div onclick="showTaskDetail(22)">
+                    <h3>reviewer_d693d310_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-approved">已批准</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 22:16:21</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(22)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(22)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-approved">
+                <div onclick="showTaskDetail(21)">
+                    <h3>test_snapshot_frontend</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-approved">已批准</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 21:53:04</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(21)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(21)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(20)">
+                    <h3>前端快照测试_页面交互</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 21:52:43</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(20)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(20)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(19)">
+                    <h3>前端快照测试_1781733138056</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 21:52:18</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(19)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(19)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-approved">
+                <div onclick="showTaskDetail(18)">
+                    <h3>reviewer_snapshot_task_1781732120</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-approved">已批准</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 21:35:20</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(18)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(18)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(17)">
+                    <h3>review_20260618043917_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 20:39:17</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(17)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(17)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(16)">
+                    <h3>review_20260618043842_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 20:38:42</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(16)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(16)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(15)">
+                    <h3>review_20260618043755_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 20:37:55</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(15)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(15)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(14)">
+                    <h3>rvw_1781726406_restart_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 20:04:18</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(14)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(14)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(13)">
+                    <h3>rvw_1781726406_task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 20 ul</span>
+                        <span>创建时间: 2026-06-17 20:00:06</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(13)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(13)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(8)">
+                    <h3>E2E_Full_Task_a0ca0b61</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:31:45</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(8)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(8)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-pending_review">
+                <div onclick="showTaskDetail(7)">
+                    <h3>E2E_Full_Task_9a3cff71</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-pending_review">待复核</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:31:28</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(7)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(7)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(6)">
+                    <h3>E2E_Full_Task_da0a3aae</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:30:18</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(6)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(6)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(5)">
+                    <h3>E2E_Full_Task_1ef2a830</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:29:34</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(5)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(5)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(4)">
+                    <h3>E2E_Full_Task_6977ecbc</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:29:05</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(4)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(4)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(3)">
+                    <h3>E2E_Full_Task_53c5a544</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:28:01</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(3)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(3)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(2)">
+                    <h3>E2E_Full_Task</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:24:40</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(2)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(2)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        
+            <div class="task-card status-draft">
+                <div onclick="showTaskDetail(1)">
+                    <h3>E2E测试任务</h3>
+                    <div class="task-meta">
+                        <span class="task-status status-draft">草稿</span>
+                        <span>总体系: 50 ul</span>
+                        <span>创建时间: 2026-06-17 19:20:52</span>
+                    </div>
+                    
+                </div>
+                <div class="task-card-actions">
+                    <button class="btn-small" onclick="event.stopPropagation(); copyTask(1)" title="复制为新草稿">📋 复制</button>
+                    <button class="btn-small" onclick="event.stopPropagation(); exportTaskPlan(1)" title="导出方案 JSON">📤 导出</button>
+                </div>
+            </div>
+        </div>
+                </div>
+
+                <div id="task-detail" class="task-detail hidden">
+                    <div class="detail-header">
+                        <h3>任务详情</h3>
+                        <button onclick="closeTaskDetail()">关闭</button>
+                    </div>
+                    <div id="task-detail-content"></div>
+                </div>
+            

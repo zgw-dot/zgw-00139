@@ -196,7 +196,7 @@ curl -X POST http://localhost:5000/api/tasks/import?conflict_mode=rename \
 
 ### 验证命令
 
-运行完整测试套件（41 个测试用例）：
+运行完整测试套件（45 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell

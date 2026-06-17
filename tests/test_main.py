@@ -114,6 +114,7 @@ def run_tests():
         test_snapshot_frontend_api_contract(db, test_app, test_results)
         test_snapshot_rollback_status_block_api(db, test_app, test_results)
         test_snapshot_compare_same_version_and_detail(db, test_app, test_results)
+        test_snapshot_compare_data_structure(db, test_app, test_results)
     
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -3533,6 +3534,117 @@ def test_snapshot_compare_same_version_and_detail(db, app, results):
         import traceback as _tb
         _tb.print_exc()
         results.append({'name': '快照对比边界&详情API', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_snapshot_compare_data_structure(db, app, results):
+    print("\n--- 测试38: 对比API数据结构契约(前端解析依赖) ---")
+    try:
+        client = app.test_client()
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert template is not None
+
+        task_id = service.create_task(
+            name='_对比结构测试_前端依赖',
+            template_id=template['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+
+        snap_service.create_snapshot(task_id, 'manual', 'v1')
+
+        service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id']
+        )
+
+        diff_resp = client.get(
+            f'/api/tasks/{task_id}/snapshots/compare?version_a=1&version_b=2'
+        )
+        assert diff_resp.status_code == 200
+        diff = diff_resp.get_json()
+
+        wd = diff['well_differences']
+        assert isinstance(wd, dict), "well_differences 应为对象(按孔位名索引)"
+        for well_name, well_diff in wd.items():
+            assert isinstance(well_name, str), f"孔位键应为字符串: {well_name}"
+            assert 'change' in well_diff, f"孔位{well_name}缺少change字段"
+            assert well_diff['change'] in ['added', 'removed', 'modified']
+            if well_diff['change'] in ['added', 'removed']:
+                assert 'well' in well_diff, f"新增/删除孔位{well_name}缺少well字段"
+                well_data = well_diff['well']
+                for f in ['well_row', 'well_col', 'well_type']:
+                    assert f in well_data, f"孔位{well_name}.well缺少字段{f}"
+            elif well_diff['change'] == 'modified':
+                assert 'fields' in well_diff, f"修改孔位{well_name}缺少fields字段"
+                assert isinstance(well_diff['fields'], dict)
+        print(f"  ① well_differences 结构正确: {len(wd)} 个孔位")
+
+        rd = diff['reagent_differences']
+        assert isinstance(rd, dict), "reagent_differences 应为对象(按试剂名索引)"
+        for rname, rdiff in rd.items():
+            assert 'change' in rdiff, f"试剂{rname}缺少change字段"
+            assert rdiff['change'] in ['added', 'removed', 'modified']
+            if rdiff['change'] in ['added', 'removed']:
+                assert 'data' in rdiff, f"新增/删除试剂{rname}缺少data字段"
+                rdata = rdiff['data']
+                for f in ['reagent_name', 'used_volume', 'used_volume_unit', 'source']:
+                    assert f in rdata, f"试剂{rname}.data缺少字段{f}"
+            elif rdiff['change'] == 'modified':
+                assert 'fields' in rdiff, f"修改试剂{rname}缺少fields字段"
+                assert isinstance(rdiff['fields'], dict)
+        print(f"  ② reagent_differences 结构正确: {len(rd)} 个试剂")
+
+        pd = diff['primer_differences']
+        assert isinstance(pd, dict), "primer_differences 应为对象(按引物名索引)"
+        for pname, pdiff in pd.items():
+            assert 'change' in pdiff, f"引物{pname}缺少change字段"
+            assert pdiff['change'] in ['added', 'removed', 'modified']
+            if pdiff['change'] in ['added', 'removed']:
+                assert 'data' in pdiff, f"新增/删除引物{pname}缺少data字段"
+                pdata = pdiff['data']
+                for f in ['primer_name', 'used_volume', 'used_volume_unit', 'source']:
+                    assert f in pdata, f"引物{pname}.data缺少字段{f}"
+            elif pdiff['change'] == 'modified':
+                assert 'fields' in pdiff, f"修改引物{pname}缺少fields字段"
+                assert isinstance(pdiff['fields'], dict)
+        print(f"  ③ primer_differences 结构正确: {len(pd)} 个引物")
+
+        wellsAdded = [{'name': n, **d} for n, d in wd.items() if d['change'] == 'added']
+        reagentsAdded = [{'name': n, **d} for n, d in rd.items() if d['change'] == 'added']
+        primersAdded = [{'name': n, **d} for n, d in pd.items() if d['change'] == 'added']
+        assert len(wellsAdded) == diff['summary']['wells_added'], "前端转换后新增孔位数应匹配summary"
+        assert len(reagentsAdded) == diff['summary']['reagents_added'], "前端转换后新增试剂数应匹配summary"
+        assert len(primersAdded) == diff['summary']['primers_added'], "前端转换后新增引物数应匹配summary"
+        print(f"  ④ 前端数据转换逻辑验证通过: wells={len(wellsAdded)}, reagents={len(reagentsAdded)}, primers={len(primersAdded)}")
+
+        db.execute('DELETE FROM task_snapshots WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM reagent_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM primer_inventory_log WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM history WHERE task_id = ?', (task_id,))
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+
+        results.append({'name': '对比API数据结构契约(前端解析依赖)', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '对比API数据结构契约(前端解析依赖)', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 

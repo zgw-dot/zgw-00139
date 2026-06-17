@@ -674,75 +674,243 @@ function renderComparisonResult(diff) {
         html += '</div>';
     }
     
-    const wellDiffs = diff.well_differences || {};
-    if (wellDiffs.added && wellDiffs.added.length > 0) {
-        html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">➕ 新增孔位 (${wellDiffs.added.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">v${diff.version_b} 新增: ${wellDiffs.added.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+    const wellDiffObj = diff.well_differences || {};
+    const wellsAdded = [];
+    const wellsRemoved = [];
+    const wellsModified = [];
+    for (const [name, d] of Object.entries(wellDiffObj)) {
+        if (d.change === 'added') wellsAdded.push({ name, ...d });
+        else if (d.change === 'removed') wellsRemoved.push({ name, ...d });
+        else if (d.change === 'modified') wellsModified.push({ name, ...d });
+    }
+    
+    function renderWellTable(wells, showVersion) {
+        let h = '<div style="overflow-x:auto;"><table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        h += '<thead><tr style="background:#f8f9fa;">';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">孔位</th>';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">类型</th>';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">样本</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">样本(µL)</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">引物(µL)</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">MM(µL)</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">水(µL)</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">总计(µL)</th>';
+        h += '</tr></thead><tbody>';
+        const typeLabels = { 'sample': '样本', 'positive_control': '阳性对照', 'negative_control': '阴性对照', 'empty': '空孔' };
+        wells.forEach(w => {
+            const well = w.well || {};
+            const wellName = w.name || `${String.fromCharCode(64 + well.well_row)}${well.well_col}`;
+            const type = typeLabels[well.well_type] || well.well_type || '-';
+            h += '<tr style="border-bottom:1px solid #eee;">';
+            h += `<td style="padding:4px;font-weight:bold;">${wellName}</td>`;
+            h += `<td style="padding:4px;">${type}</td>`;
+            h += `<td style="padding:4px;">${well.sample_name || '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${well.sample_volume !== undefined ? well.sample_volume : '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${well.primer_volume !== undefined ? well.primer_volume : '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${well.master_mix_volume !== undefined ? well.master_mix_volume : '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${well.water_volume !== undefined ? well.water_volume : '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${well.total_volume !== undefined ? well.total_volume : '-'}</td>`;
+            h += '</tr>';
+        });
+        h += '</tbody></table></div>';
+        return h;
+    }
+    
+    if (wellsAdded.length > 0) {
+        html += '<div style="margin-bottom:12px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">➕ 新增孔位 (${wellsAdded.length})</h5>`;
+        html += renderWellTable(wellsAdded);
         html += '</div>';
     }
-    if (wellDiffs.removed && wellDiffs.removed.length > 0) {
-        html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">➖ 删除孔位 (${wellDiffs.removed.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">v${diff.version_b} 删除: ${wellDiffs.removed.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+    if (wellsRemoved.length > 0) {
+        html += '<div style="margin-bottom:12px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">➖ 删除孔位 (${wellsRemoved.length})</h5>`;
+        html += renderWellTable(wellsRemoved);
         html += '</div>';
     }
-    if (wellDiffs.modified && wellDiffs.modified.length > 0) {
-        html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">✏️ 修改孔位 (${wellDiffs.modified.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">${wellDiffs.modified.map(w => String.fromCharCode(64+w.well_row)+w.well_col).join(', ')}</p>`;
+    if (wellsModified.length > 0) {
+        html += '<div style="margin-bottom:12px;">';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">✏️ 修改孔位 (${wellsModified.length})</h5>`;
+        html += '<div style="overflow-x:auto;"><table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        html += '<thead><tr style="background:#f8f9fa;">';
+        html += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">孔位</th>';
+        html += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">字段</th>';
+        html += `<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">v${diff.version_a}</th>`;
+        html += `<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">v${diff.version_b}</th>`;
+        html += '</tr></thead><tbody>';
+        const fieldLabels = {
+            'well_type': '类型', 'sample_name': '样本', 'sample_volume': '样本(µL)',
+            'primer_name': '引物', 'primer_volume': '引物(µL)', 'master_mix_volume': 'MM(µL)',
+            'water_volume': '水(µL)', 'total_volume': '总计(µL)'
+        };
+        const typeLabels = { 'sample': '样本', 'positive_control': '阳性对照', 'negative_control': '阴性对照', 'empty': '空孔' };
+        wellsModified.forEach(w => {
+            const fields = w.fields || {};
+            let first = true;
+            for (const [fkey, fval] of Object.entries(fields)) {
+                const label = fieldLabels[fkey] || fkey;
+                const oldV = fval.old !== null && fval.old !== undefined ? fval.old : '-';
+                const newV = fval.new !== null && fval.new !== undefined ? fval.new : '-';
+                const formatV = (v, k) => {
+                    if (k === 'well_type') return typeLabels[v] || v;
+                    return v;
+                };
+                html += '<tr style="border-bottom:1px solid #eee;">';
+                if (first) {
+                    html += `<td style="padding:4px;font-weight:bold;" rowspan="${Object.keys(fields).length}">${w.name}</td>`;
+                    first = false;
+                }
+                html += `<td style="padding:4px;">${label}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#dc3545;">${formatV(oldV, fkey)}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#28a745;">${formatV(newV, fkey)}</td>`;
+                html += '</tr>';
+            }
+        });
+        html += '</tbody></table></div>';
         html += '</div>';
     }
     
-    const reagentDiffs = diff.reagent_differences || {};
-    if (reagentDiffs.added && reagentDiffs.added.length > 0) {
+    const reagentDiffObj = diff.reagent_differences || {};
+    const reagentsAdded = [];
+    const reagentsRemoved = [];
+    const reagentsModified = [];
+    for (const [name, d] of Object.entries(reagentDiffObj)) {
+        if (d.change === 'added') reagentsAdded.push({ name, ...d });
+        else if (d.change === 'removed') reagentsRemoved.push({ name, ...d });
+        else if (d.change === 'modified') reagentsModified.push({ name, ...d });
+    }
+    
+    function renderReagentTable(reagents, showVersion) {
+        let h = '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        h += '<thead><tr style="background:#f8f9fa;">';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">试剂</th>';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">来源</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">用量(µL)</th>';
+        h += '</tr></thead><tbody>';
+        reagents.forEach(r => {
+            const data = r.data || {};
+            h += '<tr style="border-bottom:1px solid #eee;">';
+            h += `<td style="padding:4px;font-weight:500;">${data.reagent_name || r.name}</td>`;
+            h += `<td style="padding:4px;">${data.source || '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${data.used_volume !== undefined ? data.used_volume : '-'} ${data.used_volume_unit || ''}</td>`;
+            h += '</tr>';
+        });
+        h += '</tbody></table>';
+        return h;
+    }
+    
+    if (reagentsAdded.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">💧 新增试剂 (${reagentDiffs.added.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">${reagentDiffs.added.map(r => r.reagent_name).join(', ')}</p>`;
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">💧 新增试剂 (${reagentsAdded.length})</h5>`;
+        html += renderReagentTable(reagentsAdded);
         html += '</div>';
     }
-    if (reagentDiffs.modified && reagentDiffs.modified.length > 0) {
+    if (reagentsRemoved.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">💧 试剂用量变化 (${reagentDiffs.modified.length})</h5>`;
-        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
-        html += '<tr><th style="padding:4px;text-align:left;">试剂</th><th style="padding:4px;text-align:right;">v' + diff.version_a + '</th><th style="padding:4px;text-align:right;">v' + diff.version_b + '</th></tr>';
-        reagentDiffs.modified.forEach(r => {
-            html += `<tr><td style="padding:3px;">${r.reagent_name}</td>`;
-            html += `<td style="padding:3px;text-align:right;color:#dc3545;">${r.old.used_volume} ${r.old.used_volume_unit}</td>`;
-            html += `<td style="padding:3px;text-align:right;color:#28a745;">${r.new.used_volume} ${r.new.used_volume_unit}</td></tr>`;
-        });
-        html += '</table></div>';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">💧 删除试剂 (${reagentsRemoved.length})</h5>`;
+        html += renderReagentTable(reagentsRemoved);
+        html += '</div>';
     }
-    if (reagentDiffs.removed && reagentDiffs.removed.length > 0) {
+    if (reagentsModified.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">💧 删除试剂 (${reagentDiffs.removed.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">${reagentDiffs.removed.map(r => r.reagent_name).join(', ')}</p>`;
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">💧 试剂用量变化 (${reagentsModified.length})</h5>`;
+        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        html += '<thead><tr style="background:#f8f9fa;">';
+        html += '<th style="padding:5px;text-align:left;">试剂</th>';
+        html += '<th style="padding:5px;text-align:left;">字段</th>';
+        html += `<th style="padding:5px;text-align:right;">v${diff.version_a}</th>`;
+        html += `<th style="padding:5px;text-align:right;">v${diff.version_b}</th>`;
+        html += '</tr></thead><tbody>';
+        const fieldLabels = { 'used_volume': '用量(µL)', 'used_volume_unit': '单位', 'source': '来源' };
+        reagentsModified.forEach(r => {
+            const fields = r.fields || {};
+            let first = true;
+            for (const [fkey, fval] of Object.entries(fields)) {
+                const label = fieldLabels[fkey] || fkey;
+                html += '<tr style="border-bottom:1px solid #eee;">';
+                if (first) {
+                    html += `<td style="padding:4px;font-weight:500;" rowspan="${Object.keys(fields).length}">${r.name}</td>`;
+                    first = false;
+                }
+                html += `<td style="padding:4px;">${label}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#dc3545;">${fval.old !== null && fval.old !== undefined ? fval.old : '-'}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#28a745;">${fval.new !== null && fval.new !== undefined ? fval.new : '-'}</td>`;
+                html += '</tr>';
+            }
+        });
+        html += '</tbody></table>';
         html += '</div>';
     }
     
-    const primerDiffs = diff.primer_differences || {};
-    if (primerDiffs.added && primerDiffs.added.length > 0) {
+    const primerDiffObj = diff.primer_differences || {};
+    const primersAdded = [];
+    const primersRemoved = [];
+    const primersModified = [];
+    for (const [name, d] of Object.entries(primerDiffObj)) {
+        if (d.change === 'added') primersAdded.push({ name, ...d });
+        else if (d.change === 'removed') primersRemoved.push({ name, ...d });
+        else if (d.change === 'modified') primersModified.push({ name, ...d });
+    }
+    
+    function renderPrimerTable(primers) {
+        let h = '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        h += '<thead><tr style="background:#f8f9fa;">';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">引物</th>';
+        h += '<th style="padding:5px;text-align:left;border-bottom:1px solid #ddd;">来源</th>';
+        h += '<th style="padding:5px;text-align:right;border-bottom:1px solid #ddd;">用量(µL)</th>';
+        h += '</tr></thead><tbody>';
+        primers.forEach(p => {
+            const data = p.data || {};
+            h += '<tr style="border-bottom:1px solid #eee;">';
+            h += `<td style="padding:4px;font-weight:500;">${data.primer_name || p.name}</td>`;
+            h += `<td style="padding:4px;">${data.source || '-'}</td>`;
+            h += `<td style="padding:4px;text-align:right;">${data.used_volume !== undefined ? data.used_volume : '-'} ${data.used_volume_unit || ''}</td>`;
+            h += '</tr>';
+        });
+        h += '</tbody></table>';
+        return h;
+    }
+    
+    if (primersAdded.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">🧪 新增引物 (${primerDiffs.added.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">${primerDiffs.added.map(p => p.primer_name).join(', ')}</p>`;
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#28a745;">🧪 新增引物 (${primersAdded.length})</h5>`;
+        html += renderPrimerTable(primersAdded);
         html += '</div>';
     }
-    if (primerDiffs.modified && primerDiffs.modified.length > 0) {
+    if (primersRemoved.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">🧪 引物用量变化 (${primerDiffs.modified.length})</h5>`;
-        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
-        html += '<tr><th style="padding:4px;text-align:left;">引物</th><th style="padding:4px;text-align:right;">v' + diff.version_a + '</th><th style="padding:4px;text-align:right;">v' + diff.version_b + '</th></tr>';
-        primerDiffs.modified.forEach(p => {
-            html += `<tr><td style="padding:3px;">${p.primer_name}</td>`;
-            html += `<td style="padding:3px;text-align:right;color:#dc3545;">${p.old.used_volume} ${p.old.used_volume_unit}</td>`;
-            html += `<td style="padding:3px;text-align:right;color:#28a745;">${p.new.used_volume} ${p.new.used_volume_unit}</td></tr>`;
-        });
-        html += '</table></div>';
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">🧪 删除引物 (${primersRemoved.length})</h5>`;
+        html += renderPrimerTable(primersRemoved);
+        html += '</div>';
     }
-    if (primerDiffs.removed && primerDiffs.removed.length > 0) {
+    if (primersModified.length > 0) {
         html += '<div style="margin-bottom:10px;">';
-        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#dc3545;">🧪 删除引物 (${primerDiffs.removed.length})</h5>`;
-        html += `<p style="font-size:11px;color:#666;">${primerDiffs.removed.map(p => p.primer_name).join(', ')}</p>`;
+        html += `<h5 style="font-size:13px;margin:0 0 6px 0;color:#ffc107;">🧪 引物用量变化 (${primersModified.length})</h5>`;
+        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+        html += '<thead><tr style="background:#f8f9fa;">';
+        html += '<th style="padding:5px;text-align:left;">引物</th>';
+        html += '<th style="padding:5px;text-align:left;">字段</th>';
+        html += `<th style="padding:5px;text-align:right;">v${diff.version_a}</th>`;
+        html += `<th style="padding:5px;text-align:right;">v${diff.version_b}</th>`;
+        html += '</tr></thead><tbody>';
+        const fieldLabels = { 'used_volume': '用量(µL)', 'used_volume_unit': '单位', 'source': '来源' };
+        primersModified.forEach(p => {
+            const fields = p.fields || {};
+            let first = true;
+            for (const [fkey, fval] of Object.entries(fields)) {
+                const label = fieldLabels[fkey] || fkey;
+                html += '<tr style="border-bottom:1px solid #eee;">';
+                if (first) {
+                    html += `<td style="padding:4px;font-weight:500;" rowspan="${Object.keys(fields).length}">${p.name}</td>`;
+                    first = false;
+                }
+                html += `<td style="padding:4px;">${label}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#dc3545;">${fval.old !== null && fval.old !== undefined ? fval.old : '-'}</td>`;
+                html += `<td style="padding:4px;text-align:right;color:#28a745;">${fval.new !== null && fval.new !== undefined ? fval.new : '-'}</td>`;
+                html += '</tr>';
+            }
+        });
+        html += '</tbody></table>';
         html += '</div>';
     }
     

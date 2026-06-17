@@ -1,0 +1,8 @@
+汇总: False
+孔位表格: True
+新增孔位: True
+试剂表格: True
+引物表格: True
+样本名: True
+体积值: True
+最终: 失败
