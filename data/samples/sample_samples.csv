@@ -1,0 +1,13 @@
+name,concentration,concentration_unit,volume,volume_unit,description
+Sample_001,50,uM,100,ul,样本1 - 实验组
+Sample_002,50,uM,100,ul,样本2 - 实验组
+Sample_003,50,uM,100,ul,样本3 - 对照组
+Sample_004,50,uM,100,ul,样本4 - 实验组
+Sample_005,50,uM,100,ul,样本5 - 实验组
+Sample_006,50,uM,100,ul,样本6 - 实验组
+Sample_007,50,uM,100,ul,样本7 - 实验组
+Sample_008,50,uM,100,ul,样本8 - 实验组
+Sample_009,50,uM,100,ul,样本9 - 实验组
+Sample_010,50,uM,100,ul,样本10 - 实验组
+Sample_011,50,uM,100,ul,样本11 - 实验组
+Sample_012,50,uM,100,ul,样本12 - 实验组

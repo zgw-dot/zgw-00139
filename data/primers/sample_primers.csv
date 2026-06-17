@@ -1,0 +1,5 @@
+name,sequence,concentration,concentration_unit,volume,volume_unit,melting_temp,description
+Primer_F,ATCGATCGATCGATCG,10,uM,500,ul,58,正向引物
+Primer_R,GCTAGCTAGCTAGCTA,10,uM,500,ul,58,反向引物
+Control_Primer_F,AAGCTTAAGCTTAAGC,10,uM,200,ul,55,阳性对照正向引物
+Control_Primer_R,CTTAAGCTTAAGCTTAA,10,uM,200,ul,55,阳性对照反向引物

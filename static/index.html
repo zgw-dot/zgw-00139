@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCR 板位配液规划工具</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🧬 PCR 板位配液规划工具</h1>
+            <div class="status-bar">
+                <span id="stats-info">加载中...</span>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-btn active" data-tab="import">数据导入</button>
+            <button class="tab-btn" data-tab="tasks">任务管理</button>
+            <button class="tab-btn" data-tab="template">板位模板</button>
+            <button class="tab-btn" data-tab="history">历史记录</button>
+        </nav>
+
+        <main>
+            <section id="tab-import" class="tab-content active">
+                <div class="import-section">
+                    <h2>数据导入</h2>
+                    
+                    <div class="import-grid">
+                        <div class="import-card">
+                            <h3>📦 样本</h3>
+                            <div class="import-actions">
+                                <input type="file" id="sample-file" accept=".csv" style="display:none">
+                                <button onclick="document.getElementById('sample-file').click()">导入 CSV</button>
+                                <button onclick="loadSamples()">刷新列表</button>
+                            </div>
+                            <div id="sample-list" class="item-list">
+                                <p class="empty">暂无样本</p>
+                            </div>
+                        </div>
+
+                        <div class="import-card">
+                            <h3>🧪 引物</h3>
+                            <div class="import-actions">
+                                <input type="file" id="primer-file" accept=".csv" style="display:none">
+                                <button onclick="document.getElementById('primer-file').click()">导入 CSV</button>
+                                <button onclick="loadPrimers()">刷新列表</button>
+                            </div>
+                            <div id="primer-list" class="item-list">
+                                <p class="empty">暂无引物</p>
+                            </div>
+                        </div>
+
+                        <div class="import-card">
+                            <h3>💧 试剂</h3>
+                            <div class="import-actions">
+                                <input type="file" id="reagent-file" accept=".csv" style="display:none">
+                                <button onclick="document.getElementById('reagent-file').click()">导入 CSV</button>
+                                <button onclick="loadReagents()">刷新列表</button>
+                            </div>
+                            <div id="reagent-list" class="item-list">
+                                <p class="empty">暂无试剂</p>
+                            </div>
+                        </div>
+
+                        <div class="import-card">
+                            <h3>📋 板位模板</h3>
+                            <div class="import-actions">
+                                <input type="file" id="template-file" accept=".csv" style="display:none">
+                                <button onclick="document.getElementById('template-file').click()">导入 CSV</button>
+                                <button onclick="loadTemplates()">刷新列表</button>
+                            </div>
+                            <div id="template-list" class="item-list">
+                                <p class="empty">暂无模板</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="quick-setup">
+                    <h2>🚀 快速开始</h2>
+                    <p>点击下方按钮，一键导入所有样例数据并创建测试任务</p>
+                    <button class="btn-primary" onclick="quickSetup()">一键导入样例数据</button>
+                </div>
+            </section>
+
+            <section id="tab-tasks" class="tab-content">
+                <div class="task-section">
+                    <div class="task-header">
+                        <h2>任务管理</h2>
+                        <div class="task-filters">
+                            <select id="task-status-filter" onchange="loadTasks()">
+                                <option value="">全部状态</option>
+                                <option value="draft">草稿</option>
+                                <option value="pending_review">待复核</option>
+                                <option value="approved">已批准</option>
+                                <option value="rejected">已驳回</option>
+                                <option value="revoked">已撤销</option>
+                            </select>
+                            <button class="btn-primary" onclick="showCreateTaskModal()">+ 新建任务</button>
+                        </div>
+                    </div>
+
+                    <div id="task-list" class="task-list">
+                        <p class="empty">暂无任务</p>
+                    </div>
+                </div>
+
+                <div id="task-detail" class="task-detail hidden">
+                    <div class="detail-header">
+                        <h3>任务详情</h3>
+                        <button onclick="closeTaskDetail()">关闭</button>
+                    </div>
+                    <div id="task-detail-content"></div>
+                </div>
+            </section>
+
+            <section id="tab-template" class="tab-content">
+                <div class="template-section">
+                    <h2>板位可视化</h2>
+                    <div class="template-selector">
+                        <label>选择模板:</label>
+                        <select id="plate-template-select" onchange="renderPlateView()">
+                            <option value="">请选择模板</option>
+                        </select>
+                    </div>
+                    <div id="plate-view" class="plate-view">
+                        <p class="empty">请选择模板查看板位布局</p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-history" class="tab-content">
+                <div class="history-section">
+                    <h2>操作历史</h2>
+                    <div class="history-actions">
+                        <button onclick="loadHistory()">刷新</button>
+                        <button onclick="exportHistoryJson()">导出 JSON</button>
+                        <button onclick="exportHistoryCsv()">导出 CSV</button>
+                    </div>
+                    <div id="history-list" class="history-list">
+                        <p class="empty">暂无历史记录</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
