@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.services.data_importer import DataImporter
+from app.services.unit_converter import UnitConverter
 
 reagent_bp = Blueprint('reagents', __name__)
 
@@ -33,6 +34,12 @@ def create_reagent():
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        min_pipette_unit = data.get('min_pipette_unit', 'ul')
+        if not UnitConverter.is_volume_unit(min_pipette_unit):
+            raise ValueError(f"无效的最小移液单位: {min_pipette_unit}")
+        
         cursor = db.execute('''
             INSERT INTO reagents (name, type, concentration, concentration_unit, 
                                  volume, volume_unit, min_pipette_volume, min_pipette_unit, description)
@@ -111,6 +118,12 @@ def update_reagent(reagent_id):
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        min_pipette_unit = data.get('min_pipette_unit', 'ul')
+        if not UnitConverter.is_volume_unit(min_pipette_unit):
+            raise ValueError(f"无效的最小移液单位: {min_pipette_unit}")
+        
         db.execute('''
             UPDATE reagents SET name = ?, type = ?, concentration = ?, concentration_unit = ?,
             volume = ?, volume_unit = ?, min_pipette_volume = ?, min_pipette_unit = ?, description = ? 

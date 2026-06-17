@@ -111,9 +111,22 @@ python run.py
 
 运行完整测试套件（19 个测试用例）：
 
+**Windows PowerShell（推荐，自动处理编码）：**
+```powershell
+$env:PYTHONIOENCODING="utf-8" ; python tests/test_main.py
+```
+
+**Windows CMD：**
+```cmd
+set PYTHONIOENCODING=utf-8 && python tests\test_main.py
+```
+
+**Linux / macOS：**
 ```bash
 python tests/test_main.py
 ```
+
+> 注意：Windows 默认控制台编码为 GBK，测试输出中的中文和 µ 字符需要 UTF-8 编码支持，否则会因编码错误中断。设置 `PYTHONIOENCODING=utf-8` 可确保输出正常。
 
 测试内容包括：
 

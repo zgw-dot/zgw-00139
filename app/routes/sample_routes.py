@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.services.data_importer import DataImporter
+from app.services.unit_converter import UnitConverter
 
 sample_bp = Blueprint('samples', __name__)
 
@@ -33,6 +34,9 @@ def create_sample():
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        
         cursor = db.execute('''
             INSERT INTO samples (name, concentration, concentration_unit, volume, volume_unit, description)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -103,6 +107,9 @@ def update_sample(sample_id):
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        
         db.execute('''
             UPDATE samples SET name = ?, concentration = ?, concentration_unit = ?, 
             volume = ?, volume_unit = ?, description = ? WHERE id = ?

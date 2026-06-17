@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.services.data_importer import DataImporter
+from app.services.unit_converter import UnitConverter
 
 primer_bp = Blueprint('primers', __name__)
 
@@ -33,6 +34,9 @@ def create_primer():
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        
         cursor = db.execute('''
             INSERT INTO primers (name, sequence, concentration, concentration_unit, 
                                 volume, volume_unit, melting_temp, description)
@@ -109,6 +113,9 @@ def update_primer(primer_id):
     data = request.get_json()
     
     try:
+        if not UnitConverter.is_volume_unit(data['volume_unit']):
+            raise ValueError(f"无效的体积单位: {data['volume_unit']}")
+        
         db.execute('''
             UPDATE primers SET name = ?, sequence = ?, concentration = ?, concentration_unit = ?,
             volume = ?, volume_unit = ?, melting_temp = ?, description = ? WHERE id = ?

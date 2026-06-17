@@ -76,7 +76,7 @@ def run_tests():
         test_import_reagents(db, test_results)
         test_import_template(db, test_results)
         test_well_conflict(db, test_results)
-        test_invalid_unit_interception(db, test_results)
+        test_invalid_unit_interception(db, test_app, test_results)
         test_create_tasks(db, test_results)
         test_generate_plans(db, test_results)
         test_normal_approval(db, test_results)
@@ -324,14 +324,16 @@ def test_well_conflict(db, results):
         print(f"  ❌ 失败: {e}")
 
 
-def test_invalid_unit_interception(db, results):
+def test_invalid_unit_interception(db, app, results):
     print("\n--- 测试7: 非法单位拦截 ---")
     try:
         from app.services.data_importer import DataImporter
         from app.services.task_service import TaskService
         service = TaskService(db)
         
-        bad_sample_csv = "name,volume,volume_unit,concentration,concentration_unit,description\nBadS1,100,foobar,50,ng/uL,坏样本\n"
+        client = app.test_client()
+        
+        bad_sample_csv = "name,concentration,concentration_unit,volume,volume_unit,description\nBadS1,50,uM,100,foobar,坏样本\n"
         try:
             DataImporter.parse_samples_csv(bad_sample_csv)
             results.append({'name': '非法单位拦截', 'passed': False, 'error': '样本非法体积单位未拦截'})
@@ -363,6 +365,68 @@ def test_invalid_unit_interception(db, results):
             if '体积单位无效' not in str(e):
                 raise
             print(f"  ✅ 试剂导入拦截: {str(e)[:60]}")
+        
+        samples_before = db.execute('SELECT COUNT(*) as c FROM samples').fetchone()['c']
+        resp = client.post('/api/samples', json={
+            'name': 'APIBadSample',
+            'concentration': 50,
+            'concentration_unit': 'uM',
+            'volume': 100,
+            'volume_unit': 'BAD_UNIT',
+            'description': '通过API录入的坏样本'
+        })
+        assert resp.status_code == 400, f"API录入-样本应该返回400，实际 {resp.status_code}"
+        resp_data = resp.get_json()
+        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-样本错误信息不对: {resp_data}"
+        samples_after = db.execute('SELECT COUNT(*) as c FROM samples').fetchone()['c']
+        assert samples_before == samples_after, f"API录入-样本失败不应入库 ({samples_before} → {samples_after})"
+        print(f"  ✅ API录入-样本拦截: {resp_data['error'][:55]}")
+        
+        primers_before = db.execute('SELECT COUNT(*) as c FROM primers').fetchone()['c']
+        resp = client.post('/api/primers', json={
+            'name': 'APIBadPrimer',
+            'sequence': 'ATCGATCG',
+            'concentration': 10,
+            'concentration_unit': 'uM',
+            'volume': 500,
+            'volume_unit': 'BAD_UNIT'
+        })
+        assert resp.status_code == 400, f"API录入-引物应该返回400，实际 {resp.status_code}"
+        resp_data = resp.get_json()
+        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-引物错误信息不对: {resp_data}"
+        primers_after = db.execute('SELECT COUNT(*) as c FROM primers').fetchone()['c']
+        assert primers_before == primers_after, f"API录入-引物失败不应入库 ({primers_before} → {primers_after})"
+        print(f"  ✅ API录入-引物拦截: {resp_data['error'][:55]}")
+        
+        reagents_before = db.execute('SELECT COUNT(*) as c FROM reagents').fetchone()['c']
+        resp = client.post('/api/reagents', json={
+            'name': 'APIBadReagent',
+            'type': 'water',
+            'volume': 1000,
+            'volume_unit': 'BAD_UNIT',
+            'min_pipette_volume': 0.5
+        })
+        assert resp.status_code == 400, f"API录入-试剂应该返回400，实际 {resp.status_code}"
+        resp_data = resp.get_json()
+        assert '体积单位无效' in resp_data.get('error', ''), f"API录入-试剂错误信息不对: {resp_data}"
+        reagents_after = db.execute('SELECT COUNT(*) as c FROM reagents').fetchone()['c']
+        assert reagents_before == reagents_after, f"API录入-试剂失败不应入库 ({reagents_before} → {reagents_after})"
+        print(f"  ✅ API录入-试剂拦截: {resp_data['error'][:55]}")
+        
+        resp = client.post('/api/reagents', json={
+            'name': 'APIBadReagent2',
+            'type': 'water',
+            'volume': 1000,
+            'volume_unit': 'ul',
+            'min_pipette_volume': 0.5,
+            'min_pipette_unit': 'BAD_UNIT'
+        })
+        assert resp.status_code == 400, f"API录入-试剂最小移液单位应该返回400，实际 {resp.status_code}"
+        resp_data = resp.get_json()
+        assert '最小移液单位无效' in resp_data.get('error', ''), f"API录入-最小移液单位错误信息不对: {resp_data}"
+        print(f"  ✅ API录入-最小移液单位拦截: {resp_data['error'][:55]}")
+        
+        inv_before_api = db.execute('SELECT SUM(volume) as v FROM reagents').fetchone()['v']
         
         template = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
         try:
@@ -413,19 +477,31 @@ def test_invalid_unit_interception(db, results):
         usage_after_p = db.execute('SELECT COUNT(*) as c FROM task_primer_usage WHERE task_id = ?', (bad_task_id,)).fetchone()['c']
         status_after = db.execute('SELECT status FROM tasks WHERE id = ?', (bad_task_id,)).fetchone()['status']
         
+        inv_after = db.execute('SELECT SUM(volume) as v FROM reagents').fetchone()['v']
+        
         assert wells_before == wells_after, f"失败生成不应写孔位数据 ({wells_before} → {wells_after})"
         assert usage_before_r == usage_after_r, "失败生成不应写试剂使用数据"
         assert usage_before_p == usage_after_p, "失败生成不应写引物使用数据"
         assert status_before == status_after, f"失败生成不应改任务状态 ({status_before} → {status_after})"
-        
-        inv_before = db.execute('SELECT SUM(volume) as v FROM reagents').fetchone()['v']
-        assert inv_before is not None, "应该有库存"
+        assert inv_before == inv_after, f"失败生成不应扣减库存 ({inv_before} → {inv_after})"
+        assert inv_before_api == inv_after, f"API失败操作不应扣减库存 ({inv_before_api} → {inv_after})"
         
         db.execute('DELETE FROM tasks WHERE id = ?', (bad_task_id,))
         db.commit()
         
+        resp = client.post('/api/samples', json={
+            'name': 'API_Good_Sample',
+            'concentration': 50,
+            'concentration_unit': 'uM',
+            'volume': 100,
+            'volume_unit': 'ul',
+            'description': '合法单位样本'
+        })
+        assert resp.status_code == 201, f"合法单位样本应该创建成功，实际 {resp.status_code}"
+        print(f"  ✅ API录入-合法单位成功: 样本 {resp.get_json()['name']}")
+        
         results.append({'name': '非法单位拦截', 'passed': True})
-        print(f"  ✅ 通过 (导入/创建/生成三阶段均拦截，失败无脏数据)")
+        print(f"  ✅ 通过 (CSV/API/创建/生成四阶段均拦截，失败无脏数据)")
     except AssertionError:
         pass
     except Exception as e:
