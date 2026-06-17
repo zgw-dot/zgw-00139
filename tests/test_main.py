@@ -94,6 +94,7 @@ def run_tests():
         test_history_records(db, test_app, db_path, test_results)
         test_report_export(db, test_results)
         test_insufficient_inventory(db, test_results)
+        test_user_template_flow_e2e(db, test_app, test_results)
         test_data_persistence(db, test_app, db_path, test_results)
     
     if os.path.exists(db_path):
@@ -130,11 +131,102 @@ def run_tests():
         
         if 'run_tests.py' in readme:
             doc_checks.append("README 项目结构或命令中还引用不存在的 run_tests.py")
-        
-        for path in ['/api/reports/task/', '/api/history/export']:
-            if path not in readme:
-                doc_checks.append(f"README 缺少文档化的关键 API 路径: {path}")
-        
+
+        # ================================================================
+        # 【根因修复】双向 API 路径校验：自动扫描 Flask 真实路由 +
+        #            对比 README 中声明的路径，防止文档与实现脱节
+        # ================================================================
+        _app = test_app
+        real_rules = []
+        for _rule in sorted(_app.url_map.iter_rules(), key=lambda r: r.rule):
+            if not _rule.rule.startswith('/api/'):
+                continue
+            # 将 <int:xxx> 统一归一成 <int:...>，便于与 README 中写法匹配
+            _normalized = re.sub(r'<int:\w+>', '<int:...>', _rule.rule)
+            _methods = sorted(_rule.methods - {'HEAD', 'OPTIONS'})
+            real_rules.append((_normalized, _methods))
+
+        # README 中声明的路径：提取 API 概览表格或代码段中 /api/... 格式路径
+        declared_paths = set()
+        declared_pattern = re.compile(r'/api/[^\s`|\n)]+')
+        for _m in declared_pattern.finditer(readme):
+            raw = _m.group(0)
+            # 截掉末尾可能跟着的 Markdown 语法符号 / query 参数
+            raw = raw.split('?')[0]                 # 丢掉 ?query=xxx
+            raw = re.sub(r'[>*]+$', '', raw)        # 去掉尾随 '>' '*'
+            raw = raw.rstrip('.,;:|/-')
+            if len(raw) < 5 or not raw.startswith('/api/'):
+                continue
+            # README 常写 <id> / <template_id> / <task_id>，统一归一为 <int:...>
+            norm = re.sub(r'<\w+>', '<int:...>', raw)
+            norm = re.sub(r'<int:\w+>', '<int:...>', norm)
+            # 丢掉因 Markdown 表格语法被吃掉后半段的残缺占位（比如 "/api/templates/<int..."）
+            if '<' in norm and '>' not in norm:
+                continue
+            declared_paths.add(norm)
+
+        # 方向 1：README 声明了但真实代码里没有 → 文档写了假接口
+        real_path_set = {p for p, _ in real_rules}
+        for dp in sorted(declared_paths):
+            dp_clean = dp.rstrip('/')
+            real_has_exact = dp_clean in real_path_set
+            real_has_prefix = any(rp.startswith(dp_clean + '/') for rp in real_path_set)
+            # 含动态段时：前缀+后缀匹配即可
+            real_match_param = False
+            if not real_has_exact and '<int:...>' in dp_clean:
+                parts = dp_clean.split('<int:...>')
+                if len(parts) >= 2:
+                    prefix = parts[0].rstrip('/')
+                    suffix = parts[-1]
+                    for rp in real_path_set:
+                        if (rp.startswith(prefix + '/') and rp.endswith(suffix)
+                            and '<int:...>' in rp):
+                            real_match_param = True
+                            break
+            if not real_has_exact and not real_has_prefix and not real_match_param:
+                doc_checks.append(f"README 声明接口但实现中不存在: {dp}")
+
+        # 方向 2：真实存在的关键业务接口但 README 没提 → 能力漏文档
+        _must_doc = [
+            '/api/templates/import',
+            '/api/templates/<int:...>/export/json',
+            '/api/templates/<int:...>/export/csv',
+            '/api/templates/<int:...>/copy',
+            '/api/reports/task/<int:...>',
+            '/api/reports/task/<int:...>/json',
+            '/api/reports/task/<int:...>/csv',
+            '/api/history/export/json',
+            '/api/history/export/csv',
+        ]
+        for mp in _must_doc:
+            mp_clean = mp.rstrip('/')
+            doc_has = mp_clean in declared_paths or mp + '/' in declared_paths
+            # 允许 README 用 <int:template_id> / <template_id> / <id> 等写法
+            wildcard_ok = False
+            if not doc_has and '<int:...>' in mp_clean:
+                prefix = mp_clean.split('<int:...>')[0]
+                suffix = mp_clean.split('<int:...>')[-1]
+                for dp in declared_paths:
+                    if (dp.startswith(prefix) and dp.endswith(suffix)
+                        and re.search(r'/<[^>]+>/', dp)):
+                        wildcard_ok = True
+                        break
+            if not doc_has and not wildcard_ok:
+                doc_checks.append(f"关键能力已实现但 README 漏文档: {mp}")
+
+        # 模板四大能力的文字说明必须在 README 使用说明章节出现
+        # 关键词可以是 API 路径、冲突处理字段名、或是可读的中文提示
+        _template_capabilities = [
+            ('模板导出', ['/api/templates/', 'export/json', 'export/csv', '导出模板']),
+            ('模板复制', ['/copy', '复制模板', '副本']),
+            ('导入冲突处理', ['conflict_mode', 'reject', 'rename', 'overwrite', '冲突处理']),
+            ('模板删除保护', ['template_in_use', '被任务引用', '删除保护', '拦截']),
+        ]
+        for cap_name, keywords in _template_capabilities:
+            found = any(kw.lower() in readme.lower() for kw in keywords)
+            if not found:
+                doc_checks.append(f"README 使用说明缺少模板能力「{cap_name}」")
+
         required_files = [
             'run.py', 'requirements.txt', 'tests/test_main.py',
             'app/__init__.py', 'app/database.py', 'static/index.html'
@@ -1630,6 +1722,139 @@ def test_data_persistence(db, app, db_path, results):
             print("  ✅ 通过")
     except Exception as e:
         results.append({'name': '重启后数据一致性', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_user_template_flow_e2e(db, app, results):
+    """用户可感知链路验证：导出模板→再导入→复制→建任务→生成方案
+    覆盖用户照着 README 一步步点下来能否完整走通。"""
+    print("\n--- 测试15: 用户链路端到端 (导出→再导入→复制→建任务)")
+    try:
+        client = app.test_client()
+
+        # === Step 0: 选一个已有模板作为起点
+        base = db.execute('SELECT * FROM plate_templates LIMIT 1').fetchone()
+        assert base is not None, "需要至少一个模板"
+        base_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name '
+            'FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (base['id'],)
+        ).fetchall()
+
+        # === Step 1: 导出 JSON (模拟用户在模板列表点"导出 JSON")
+        resp_json = client.get(f'/api/templates/{base["id"]}/export/json')
+        assert resp_json.status_code == 200, f"导出 JSON 失败 HTTP {resp_json.status_code}"
+        raw_json = json.loads(resp_json.data.decode('utf-8'))
+        assert raw_json['name'] == base['name'], f"导出的 JSON 中 name 不匹配"
+        assert len(raw_json['wells']) == len(base_wells), \
+            f"导出孔位数不匹配: {len(raw_json['wells'])} vs {len(base_wells)}"
+        print(f"  ① 导出 JSON  OK  →  filename={base['name']}.json, wells={len(raw_json['wells'])}")
+
+        # === Step 2: 用导出的 JSON 重新导入 (模拟用户换了一台机器重新导入)
+        reimport_name = base['name'] + '_重新导入'
+        resp_import = client.post('/api/templates/import', json={
+            'name': reimport_name,
+            'rows': raw_json['rows'],
+            'cols': raw_json['cols'],
+            'wells': raw_json['wells'],
+        })
+        assert resp_import.status_code == 201, \
+            f"重新导入失败: {resp_import.status_code} {resp_import.get_json()}"
+        reimported = resp_import.get_json()
+
+        # 校验孔位内容完全一致
+        reimported_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name '
+            'FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (reimported['id'],)
+        ).fetchall()
+        assert len(reimported_wells) == len(base_wells), \
+            f"重导入后孔位数不一致: {len(reimported_wells)} vs {len(base_wells)}"
+        for bw, rw in zip(base_wells, reimported_wells):
+            assert (bw['well_row'] == rw['well_row'] and
+                  bw['well_col'] == rw['well_col'] and
+                  bw['well_type'] == rw['well_type'] and
+                  bw['sample_name'] == rw['sample_name']), \
+                f"孔位不一致: base=({bw['well_row']},{bw['well_col']}) {bw['well_type']}/{bw['sample_name']} " \
+                f"vs reimported=({rw['well_row']},{rw['well_col']}) {rw['well_type']}/{rw['sample_name']}"
+        print(f"  ② JSON 重新导入 OK  →  name={reimported['name']}, wells={len(reimported_wells)}, 内容一致")
+
+        # === Step 3: 复制模板 (模拟用户想基于已有模板微调)
+        copy_name = base['name'] + '_用户副本'
+        resp_copy = client.post(f'/api/templates/{base["id"]}/copy',
+                            json={'name': copy_name})
+        assert resp_copy.status_code == 201, f"复制失败: {resp_copy.status_code} {resp_copy.get_json()}"
+        copied = resp_copy.get_json()
+        copied_wells = db.execute(
+            'SELECT well_row, well_col, well_type, sample_name '
+            'FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (copied['id'],)
+        ).fetchall()
+        for bw, cw in zip(base_wells, copied_wells):
+            assert bw['well_type'] == cw['well_type'], \
+                f"复制后孔位类型不匹配: ({cw['well_row']},{cw['well_col']})"
+        print(f"  ③ 复制模板   OK  →  {base['name']} → {copied['name']}, wells={len(copied_wells)}")
+
+        # === Step 4: 用复制出的模板创建任务 + 生成方案 (验证复制品可以真能用)
+        from app.services.task_service import TaskService
+        service = TaskService(db)
+        task_id = service.create_task(
+            name='_用户链路_副本建任务',
+            template_id=copied['id'],
+            total_volume=20,
+            volume_unit='ul'
+        )
+        primer = db.execute("SELECT * FROM primers LIMIT 1").fetchone()
+        mm = db.execute("SELECT * FROM reagents WHERE type = 'master_mix' LIMIT 1").fetchone()
+        water = db.execute("SELECT * FROM reagents WHERE type = 'water' LIMIT 1").fetchone()
+        assert all([primer, mm, water]), "缺少基础数据不足，无法生成方案"
+        plan = service.generate_plan(
+            task_id=task_id,
+            primer_id=primer['id'],
+            master_mix_id=mm['id'],
+            water_id=water['id'],
+        )
+        assert plan['status'] == 'pending_review', f"方案生成状态异常: {plan['status']}"
+        task_after = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert task_after['status'] == 'pending_review', \
+            f"任务状态应为 pending_review，实为 {task_after['status']}"
+        usage_count = db.execute(
+            "SELECT COUNT(*) AS cnt FROM task_reagent_usage WHERE task_id = ?", (task_id,)
+        ).fetchone()['cnt']
+        assert usage_count > 0, "应生成试剂用量"
+        print(f"  ④ 副本建任务  OK  →  task_id={task_id}, reagents={usage_count}, status={plan['status']}")
+
+        # === Step 5: 同名导入冲突拒绝验证
+        resp_conflict = client.post('/api/templates/import', json={
+            'name': base['name'],
+            'rows': 2,
+            'cols': 3,
+            'wells': [{'well_row': 1, 'well_col': 1, 'well_type': 'sample'}],
+        })
+        assert resp_conflict.status_code == 409, f"同名冲突默认应为 409, got {resp_conflict.status_code}"
+        conflict_info = resp_conflict.get_json()
+        assert conflict_info.get('conflict') == 'name_exists', \
+            f"冲突字段不对: {conflict_info}"
+        print(f"  ⑤ 冲突拒绝   OK  →  HTTP 409, conflict=name_exists")
+
+        # 清理测试留下的临时数据，避免污染后续测试
+        for tid in [task_id]:
+            db.execute('DELETE FROM task_wells WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM history WHERE task_id = ?', (tid,))
+            db.execute('DELETE FROM tasks WHERE id = ?', (tid,))
+        for tplid in [reimported['id'], copied['id']]:
+            db.execute('DELETE FROM template_wells WHERE template_id = ?', (tplid,))
+            db.execute('DELETE FROM plate_templates WHERE id = ?', (tplid,))
+        db.commit()
+
+        results.append({'name': '用户链路端到端', 'passed': True})
+        print("  ✅ 通过 (5 步全链路均 OK)")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '用户链路端到端', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 

@@ -61,6 +61,39 @@ python run.py
 
 导入成功后会显示各数据的统计信息。
 
+#### 步骤1.5：板位模板管理（导出 / 复制 / 冲突处理 / 删除保护）
+
+在模板列表中对任意模板可执行以下操作：
+
+| 操作 | 说明 |
+|------|------|
+| **导出 JSON** | `GET /api/templates/<id>/export/json` ，下载包含 name/rows/cols/description/wells 的 JSON 文件，可在任意环境重新导入。 |
+| **导出 CSV** | `GET /api/templates/<id>/export/csv` ，下载网格格式 CSV，与 CSV 导入格式完全一致，可直接作为导入源。 |
+| **复制模板** | `POST /api/templates/<id>/copy` ，支持自定义 name 与 description；若 name 已存在自动追加 `_副本` + 递增编号；复制后可直接用于创建任务。 |
+| **删除模板** | `DELETE /api/templates/<id>` 。若模板已被任务引用，返回 HTTP 409 + `reason=template_in_use` + 引用任务列表，**拒绝删除**以保护历史任务数据；清理引用后可再删除。 |
+
+**同名导入冲突处理** — 导入 CSV / JSON 时若目标模板名已存在，通过 `conflict_mode` 参数选择处理方式（支持 form 字段 / query 参数 / JSON body 三种传入方式）：
+
+| conflict_mode | HTTP | 行为 |
+|---------------|------|------|
+| `reject` (默认) | **409** | 拒绝导入，响应体含 `conflict: "name_exists"` + `existing_id` 供前端提示。 |
+| `rename` | **201** | 自动追加 `_2` / `_3` … 递增后缀，新建独立模板，**原模板内容不变**。 |
+| `overwrite` | **200** | 保留原 ID，替换 rows / cols / description / wells 内容；响应含 `overwritten: true` 标记。 |
+
+示例：
+
+```bash
+# 重命名模式导入 JSON 模板
+curl -X POST http://localhost:5000/api/templates/import?conflict_mode=rename \
+  -F "name=我的96孔板" \
+  -F "file=@template.json"
+
+# 覆盖模式导入（原模板内容会被替换）
+curl -X POST http://localhost:5000/api/templates/import \
+  -H "Content-Type: application/json" \
+  -d '{"name":"96孔标准板","rows":8,"cols":12,"conflict_mode":"overwrite","wells":[...]}'
+```
+
 #### 步骤2：创建任务
 
 打开 **"任务管理"** 标签页：
@@ -109,7 +142,7 @@ python run.py
 
 ### 验证命令
 
-运行完整测试套件（20 个测试用例）：
+运行完整测试套件（26 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell
@@ -134,6 +167,12 @@ python tests/test_main.py
 |---------|---------|------|
 | 1 | 单位换算 | 体积/浓度单位换算，含特殊字符 µ |
 | 2-5 | 数据导入 | 样本、引物、试剂、板位模板导入 |
+| 5b | 模板迁移 & 生命周期 | schema 迁移、事务回滚、重启可读、导入→任务→方案 |
+| 5c | 模板导出 & 重新导入 | JSON/CSV 导出后再导入，孔位与类型完全一致 |
+| 5d | 模板复制 | 深拷贝内容一致，支持自定义名称，复制品可建任务 |
+| 5e | 导入冲突处理 | reject 拒绝 / rename 改名 / overwrite 覆盖三种模式 |
+| 5f | 模板删除保护 | 被任务引用时 409 拦截（template_in_use），清理后可删 |
+| 5g | 模板历史记录 | 模板类操作全量写入 history 表 |
 | 6 | 孔位冲突检测 | 同一孔位重复分配拦截 |
 | 7 | 非法单位拦截 | 导入/创建/生成三阶段均拦截非法体积单位，失败无脏数据 |
 | 8 | 创建任务 | 多任务创建 |
@@ -147,7 +186,8 @@ python tests/test_main.py
 | 16 | 历史记录与导出 | 历史记录完整性和 JSON/CSV 导出 |
 | 17 | 报告导出 | 配液报告导出 |
 | 18 | 库存不足拦截 | 库存不足时拦截，不预占库存 |
-| 19 | 重启后数据一致性 | 模拟重启验证数据持久化 |
+| 19 | 用户链路端到端 | 导出 JSON → 重新导入 → 复制模板 → 建任务生成方案 → 冲突拒绝（5 步完整链路） |
+| 20 | 重启后数据一致性 | 模拟重启验证数据持久化、历史记录导出完整性 |
 
 ## CSV 数据格式
 
@@ -248,7 +288,11 @@ zgw-00139/
 | POST | `/api/samples/import` | 导入样本 CSV |
 | POST | `/api/primers/import` | 导入引物 CSV |
 | POST | `/api/reagents/import` | 导入试剂 CSV |
-| POST | `/api/templates/import` | 导入板位模板 CSV |
+| POST | `/api/templates/import` | 导入板位模板（CSV/JSON），支持冲突处理 |
+| GET | `/api/templates/<id>/export/json` | 导出模板为 JSON |
+| GET | `/api/templates/<id>/export/csv` | 导出模板为 CSV |
+| POST | `/api/templates/<id>/copy` | 复制模板 |
+| DELETE | `/api/templates/<id>` | 删除模板（被引用时拦截） |
 | GET | `/api/tasks` | 任务列表 |
 | POST | `/api/tasks` | 创建任务 |
 | POST | `/api/tasks/<id>/generate` | 生成配液方案 |
