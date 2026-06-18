@@ -350,3 +350,86 @@ def create_snapshot_manually(task_id):
         return jsonify(result), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 400
+
+
+@task_bp.route('/<int:task_id>/edit', methods=['GET'])
+def get_edit_preview(task_id):
+    from app.database import get_db
+    from app.services.task_service import TaskService
+
+    db = get_db(current_app)
+    service = TaskService(db)
+
+    try:
+        result = service.get_edit_preview(task_id)
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        status_code = 400
+        if '不能编辑' in error_msg or '只读' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code
+
+
+@task_bp.route('/<int:task_id>/edit/validate', methods=['POST'])
+def validate_edit(task_id):
+    from app.database import get_db
+    from app.services.task_service import TaskService
+
+    db = get_db(current_app)
+    service = TaskService(db)
+
+    edit_data = request.get_json() or {}
+
+    try:
+        result = service.validate_edit(task_id, edit_data)
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        status_code = 400
+        if '不能编辑' in error_msg or '只读' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code
+
+
+@task_bp.route('/<int:task_id>/edit/diff', methods=['POST'])
+def calculate_edit_diff(task_id):
+    from app.database import get_db
+    from app.services.task_service import TaskService
+
+    db = get_db(current_app)
+    service = TaskService(db)
+
+    edit_data = request.get_json() or {}
+
+    try:
+        result = service.calculate_edit_diff(task_id, edit_data)
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        status_code = 400
+        if '不能编辑' in error_msg or '只读' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code
+
+
+@task_bp.route('/<int:task_id>/edit', methods=['POST'])
+def apply_edit(task_id):
+    from app.database import get_db
+    from app.services.task_service import TaskService
+
+    db = get_db(current_app)
+    service = TaskService(db)
+
+    edit_data = request.get_json() or {}
+    operator = edit_data.get('operator', 'user')
+
+    try:
+        result = service.apply_edit(task_id, edit_data, operator=operator)
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        status_code = 400
+        if '不能编辑' in error_msg or '只读' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code

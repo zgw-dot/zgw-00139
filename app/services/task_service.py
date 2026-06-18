@@ -640,6 +640,441 @@ class TaskService:
         
         return conflicts
     
+    def get_edit_preview(self, task_id):
+        task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task:
+            raise ValueError('任务不存在')
+
+        if task['status'] in ['approved', 'revoked']:
+            raise ValueError(f'当前状态为「{task["status"]}」的任务不能编辑，已批准和已撤销的任务只读')
+
+        template = self.db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (task['template_id'],)
+        ).fetchone()
+
+        template_wells = self.db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (task['template_id'],)
+        ).fetchall()
+
+        task_wells = self.db.execute(
+            'SELECT * FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (task_id,)
+        ).fetchall()
+
+        all_templates = self.db.execute(
+            'SELECT id, name, rows, cols FROM plate_templates ORDER BY id'
+        ).fetchall()
+
+        all_samples = self.db.execute(
+            'SELECT id, name, concentration, concentration_unit, volume, volume_unit FROM samples ORDER BY id'
+        ).fetchall()
+
+        return {
+            'task': {
+                'id': task['id'],
+                'name': task['name'],
+                'status': task['status'],
+                'total_volume': task['total_volume'],
+                'volume_unit': task['volume_unit'],
+            },
+            'current_template': {
+                'id': template['id'],
+                'name': template['name'],
+                'rows': template['rows'],
+                'cols': template['cols'],
+            } if template else None,
+            'current_wells': [dict(w) for w in (task_wells if task_wells else template_wells)],
+            'available_templates': [dict(t) for t in all_templates],
+            'available_samples': [dict(s) for s in all_samples],
+        }
+
+    def validate_edit(self, task_id, edit_data):
+        task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task:
+            raise ValueError('任务不存在')
+
+        if task['status'] in ['approved', 'revoked']:
+            raise ValueError(f'当前状态为「{task["status"]}」的任务不能编辑，已批准和已撤销的任务只读')
+
+        errors = []
+        warnings = []
+
+        new_template_id = edit_data.get('template_id', task['template_id'])
+        new_total_volume = edit_data.get('total_volume', task['total_volume'])
+        new_volume_unit = edit_data.get('volume_unit', task['volume_unit'])
+        new_wells = edit_data.get('wells', None)
+
+        if not UnitConverter.is_volume_unit(new_volume_unit):
+            errors.append(f'无效的体积单位: {new_volume_unit}')
+
+        if new_total_volume is None or new_total_volume <= 0:
+            errors.append('总体积必须大于 0')
+
+        template = self.db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (new_template_id,)
+        ).fetchone()
+        if not template:
+            errors.append(f'模板不存在 (id={new_template_id})')
+            return {'valid': False, 'errors': errors, 'warnings': warnings}
+
+        template_wells = self.db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (new_template_id,)
+        ).fetchall()
+
+        wells_to_validate = new_wells if new_wells is not None else [dict(w) for w in template_wells]
+
+        if wells_to_validate:
+            well_conflicts = self._check_well_conflicts(wells_to_validate)
+            if well_conflicts:
+                errors.append(f'孔位冲突: {json.dumps(well_conflicts, ensure_ascii=False)}')
+
+            for well in wells_to_validate:
+                wr = well.get('well_row')
+                wc = well.get('well_col')
+                if wr is None or wc is None:
+                    errors.append(f'孔位缺少行/列信息: {json.dumps(well, ensure_ascii=False)}')
+                    continue
+                if wr < 1 or wr > template['rows'] or wc < 1 or wc > template['cols']:
+                    errors.append(
+                        f'孔位 {chr(64 + wr)}{wc} 超出模板范围 '
+                        f'({template["rows"]}行×{template["cols"]}列)'
+                    )
+
+                well_type = well.get('well_type', 'sample')
+                if well_type not in ['sample', 'positive_control', 'negative_control', 'empty']:
+                    errors.append(f'孔位 {chr(64 + wr)}{wc} 的类型无效: {well_type}')
+
+                if well_type == 'sample' and well.get('sample_name'):
+                    sample = self.db.execute(
+                        'SELECT * FROM samples WHERE name = ?', (well['sample_name'],)
+                    ).fetchone()
+                    if not sample:
+                        errors.append(f'孔位 {chr(64 + wr)}{wc} 引用的样本不存在: {well["sample_name"]}')
+
+        all_primers = self.db.execute('SELECT * FROM primers').fetchall()
+        all_reagents = self.db.execute('SELECT * FROM reagents').fetchall()
+        all_samples = self.db.execute('SELECT * FROM samples').fetchall()
+
+        has_primer = len(all_primers) > 0
+        has_master_mix = any(r['type'] == 'master_mix' for r in all_reagents)
+        has_water = any(r['type'] == 'water' for r in all_reagents)
+
+        if not has_primer:
+            errors.append('缺少引物，请先导入引物')
+        if not has_master_mix:
+            errors.append('缺少 Master Mix 试剂')
+        if not has_water:
+            errors.append('缺少水试剂')
+
+        if not errors and has_primer and has_master_mix and has_water:
+            primer = all_primers[0]
+            master_mix = next(r for r in all_reagents if r['type'] == 'master_mix')
+            water = next(r for r in all_reagents if r['type'] == 'water')
+
+            sample_count = sum(1 for w in wells_to_validate if w.get('well_type') in ['sample', 'positive_control'])
+            nc_count = sum(1 for w in wells_to_validate if w.get('well_type') == 'negative_control')
+            total_wells_for_reagent = sample_count + nc_count
+
+            if total_wells_for_reagent > 0:
+                total_vol_ul = UnitConverter.convert_volume(new_total_volume, new_volume_unit, 'ul')
+                mm_vol_per_well = total_vol_ul * self.engine.DEFAULT_MASTER_MIX_VOLUME_RATIO
+                primer_vol_per_well = total_vol_ul * self.engine.DEFAULT_PRIMER_VOLUME_RATIO
+                sample_vol_per_well = total_vol_ul * self.engine.DEFAULT_SAMPLE_VOLUME_RATIO
+
+                mm_total = mm_vol_per_well * total_wells_for_reagent
+                primer_total = primer_vol_per_well * total_wells_for_reagent
+
+                mm_available = UnitConverter.convert_volume(
+                    master_mix['volume'], master_mix['volume_unit'], 'ul'
+                )
+                if mm_available < mm_total:
+                    errors.append(
+                        f'Master Mix 库存不足: {master_mix["name"]}, '
+                        f'可用 {mm_available:.2f} µL, 需要 {mm_total:.2f} µL'
+                    )
+                elif mm_available < mm_total * 1.1:
+                    warnings.append(
+                        f'Master Mix 库存接近耗尽: {master_mix["name"]}, '
+                        f'可用 {mm_available:.2f} µL, 需要 {mm_total:.2f} µL'
+                    )
+
+                primer_available = UnitConverter.convert_volume(
+                    primer['volume'], primer['volume_unit'], 'ul'
+                )
+                if primer_available < primer_total:
+                    errors.append(
+                        f'引物库存不足: {primer["name"]}, '
+                        f'可用 {primer_available:.2f} µL, 需要 {primer_total:.2f} µL'
+                    )
+                elif primer_available < primer_total * 1.1:
+                    warnings.append(
+                        f'引物库存接近耗尽: {primer["name"]}, '
+                        f'可用 {primer_available:.2f} µL, 需要 {primer_total:.2f} µL'
+                    )
+
+                if mm_vol_per_well < 0.5:
+                    warnings.append(
+                        f'单孔 Master Mix 体积 ({mm_vol_per_well:.2f} µL) 低于最小移液体积 0.5 µL'
+                    )
+                if primer_vol_per_well < 0.5:
+                    warnings.append(
+                        f'单孔引物体积 ({primer_vol_per_well:.2f} µL) 低于最小移液体积 0.5 µL'
+                    )
+                if sample_count > 0 and sample_vol_per_well < 0.5:
+                    warnings.append(
+                        f'单孔样本体积 ({sample_vol_per_well:.2f} µL) 低于最小移液体积 0.5 µL'
+                    )
+
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': warnings,
+            'template_info': {
+                'id': template['id'],
+                'name': template['name'],
+                'rows': template['rows'],
+                'cols': template['cols'],
+            } if template else None,
+            'total_volume': new_total_volume,
+            'volume_unit': new_volume_unit,
+            'well_count': len(wells_to_validate),
+        }
+
+    def calculate_edit_diff(self, task_id, edit_data):
+        task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task:
+            raise ValueError('任务不存在')
+
+        old_template = self.db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (task['template_id'],)
+        ).fetchone()
+
+        old_task_wells = self.db.execute(
+            'SELECT * FROM task_wells WHERE task_id = ? ORDER BY well_row, well_col',
+            (task_id,)
+        ).fetchall()
+        old_template_wells = self.db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (task['template_id'],)
+        ).fetchall()
+        old_wells = [dict(w) for w in (old_task_wells if old_task_wells else old_template_wells)]
+
+        new_template_id = edit_data.get('template_id', task['template_id'])
+        new_total_volume = edit_data.get('total_volume', task['total_volume'])
+        new_volume_unit = edit_data.get('volume_unit', task['volume_unit'])
+        new_wells_input = edit_data.get('wells', None)
+
+        new_template = self.db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (new_template_id,)
+        ).fetchone()
+
+        new_template_wells = self.db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (new_template_id,)
+        ).fetchall()
+        new_wells = new_wells_input if new_wells_input is not None else [dict(w) for w in new_template_wells]
+
+        diff = {
+            'task_changes': {},
+            'template_changes': {},
+            'well_changes': {
+                'added': [],
+                'removed': [],
+                'modified': [],
+            },
+            'summary': {
+                'wells_added': 0,
+                'wells_removed': 0,
+                'wells_modified': 0,
+            }
+        }
+
+        if task['total_volume'] != new_total_volume:
+            diff['task_changes']['total_volume'] = {
+                'old': task['total_volume'],
+                'new': new_total_volume
+            }
+        if task['volume_unit'] != new_volume_unit:
+            diff['task_changes']['volume_unit'] = {
+                'old': task['volume_unit'],
+                'new': new_volume_unit
+            }
+
+        if old_template and new_template and old_template['id'] != new_template['id']:
+            diff['template_changes'] = {
+                'old': {'id': old_template['id'], 'name': old_template['name'],
+                        'rows': old_template['rows'], 'cols': old_template['cols']},
+                'new': {'id': new_template['id'], 'name': new_template['name'],
+                        'rows': new_template['rows'], 'cols': new_template['cols']}
+            }
+        elif (old_template and not new_template) or (not old_template and new_template):
+            diff['template_changes'] = {
+                'old': {'id': old_template['id'], 'name': old_template['name']} if old_template else None,
+                'new': {'id': new_template['id'], 'name': new_template['name']} if new_template else None
+            }
+
+        old_well_map = {(w['well_row'], w['well_col']): w for w in old_wells}
+        new_well_map = {(w['well_row'], w['well_col']): w for w in new_wells}
+
+        all_keys = set(old_well_map.keys()) | set(new_well_map.keys())
+        for key in sorted(all_keys):
+            well_label = f"{chr(64 + key[0])}{key[1]}"
+            if key not in old_well_map:
+                diff['well_changes']['added'].append({
+                    'well': well_label,
+                    'data': new_well_map[key]
+                })
+                diff['summary']['wells_added'] += 1
+            elif key not in new_well_map:
+                diff['well_changes']['removed'].append({
+                    'well': well_label,
+                    'data': old_well_map[key]
+                })
+                diff['summary']['wells_removed'] += 1
+            else:
+                ow, nw = old_well_map[key], new_well_map[key]
+                diff_fields = {}
+                for f in ['well_type', 'sample_name']:
+                    ov = ow.get(f)
+                    nv = nw.get(f)
+                    if f == 'sample_name':
+                        ov = ov if ov is not None else ''
+                        nv = nv if nv is not None else ''
+                    if ov != nv:
+                        diff_fields[f] = {'old': ov, 'new': nv}
+                if diff_fields:
+                    diff['well_changes']['modified'].append({
+                        'well': well_label,
+                        'fields': diff_fields
+                    })
+                    diff['summary']['wells_modified'] += 1
+
+        return diff
+
+    def apply_edit(self, task_id, edit_data, operator='user'):
+        task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task:
+            raise ValueError('任务不存在')
+
+        if task['status'] in ['approved', 'revoked']:
+            raise ValueError(f'当前状态为「{task["status"]}」的任务不能编辑，已批准和已撤销的任务只读')
+
+        validation = self.validate_edit(task_id, edit_data)
+        if not validation['valid']:
+            raise ValueError('编辑校验失败: ' + '; '.join(validation['errors']))
+
+        diff = self.calculate_edit_diff(task_id, edit_data)
+
+        new_template_id = edit_data.get('template_id', task['template_id'])
+        new_total_volume = edit_data.get('total_volume', task['total_volume'])
+        new_volume_unit = edit_data.get('volume_unit', task['volume_unit'])
+        new_wells_input = edit_data.get('wells', None)
+
+        new_template = self.db.execute(
+            'SELECT * FROM plate_templates WHERE id = ?', (new_template_id,)
+        ).fetchone()
+
+        new_template_wells = self.db.execute(
+            'SELECT * FROM template_wells WHERE template_id = ? ORDER BY well_row, well_col',
+            (new_template_id,)
+        ).fetchall()
+        wells_to_use = new_wells_input if new_wells_input is not None else [dict(w) for w in new_template_wells]
+
+        from app.services.snapshot_service import SnapshotService
+        snapshot_service = SnapshotService(self.db)
+        pre_edit_snapshot = snapshot_service.create_snapshot(
+            task_id, 'pre_edit', '编辑前快照'
+        )
+
+        try:
+            self.db.execute('BEGIN')
+
+            self.db.execute(
+                "UPDATE tasks SET template_id = ?, total_volume = ?, volume_unit = ?, "
+                "status = 'draft', updated_at = ? WHERE id = ?",
+                (new_template_id, new_total_volume, new_volume_unit,
+                 datetime.now().isoformat(), task_id)
+            )
+
+            self.db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
+            self.db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
+            self.db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
+
+            all_samples = {s['name']: s for s in self.db.execute(
+                'SELECT * FROM samples'
+            ).fetchall()}
+
+            for well in wells_to_use:
+                sample_name = well.get('sample_name', '')
+                sample_vol = 0
+                sample_conc = None
+                sample_conc_unit = None
+                if sample_name and sample_name in all_samples:
+                    s = all_samples[sample_name]
+                    sample_conc = s['concentration']
+                    sample_conc_unit = s['concentration_unit']
+
+                self.db.execute('''
+                    INSERT INTO task_wells
+                    (task_id, well_row, well_col, well_type, sample_name,
+                     sample_volume, sample_volume_unit, sample_concentration, sample_concentration_unit,
+                     total_volume, total_volume_unit, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task_id,
+                    well.get('well_row'),
+                    well.get('well_col'),
+                    well.get('well_type', 'sample'),
+                    sample_name,
+                    sample_vol, 'ul',
+                    sample_conc, sample_conc_unit,
+                    0, 'ul',
+                    well.get('note', '')
+                ))
+
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+        post_edit_snapshot = snapshot_service.create_snapshot(
+            task_id, 'edit',
+            f'编辑后快照: 模板={new_template["name"]}, 体积={new_total_volume}{new_volume_unit}'
+        )
+
+        diff_summary_parts = []
+        if diff['task_changes']:
+            for k, v in diff['task_changes'].items():
+                label_map = {'total_volume': '总体积', 'volume_unit': '体积单位'}
+                diff_summary_parts.append(f"{label_map.get(k, k)}: {v['old']}→{v['new']}")
+        if diff['template_changes']:
+            old_name = diff['template_changes']['old']['name'] if diff['template_changes'].get('old') else '无'
+            new_name = diff['template_changes']['new']['name'] if diff['template_changes'].get('new') else '无'
+            diff_summary_parts.append(f'模板: {old_name}→{new_name}')
+        s = diff['summary']
+        if s['wells_added'] or s['wells_removed'] or s['wells_modified']:
+            diff_summary_parts.append(
+                f'孔位: +{s["wells_added"]}/-{s["wells_removed"]}/~{s["wells_modified"]}'
+            )
+        diff_summary = '; '.join(diff_summary_parts) if diff_summary_parts else '无实质变更'
+
+        detail = (
+            f'编辑并重算任务配置，编辑前快照 v{pre_edit_snapshot["version"]}，'
+            f'编辑后快照 v{post_edit_snapshot["version"]}。变更: {diff_summary}。操作人: {operator}'
+        )
+        self._add_history(task_id, 'edit', 'task_edited', detail)
+
+        return {
+            'task_id': task_id,
+            'status': 'draft',
+            'pre_edit_version': pre_edit_snapshot['version'],
+            'post_edit_version': post_edit_snapshot['version'],
+            'diff': diff,
+            'validation_warnings': validation.get('warnings', []),
+        }
+
     def _add_history(self, task_id, action, action_type, detail):
         self.db.execute('''
             INSERT INTO history (task_id, action, action_type, detail, operator)

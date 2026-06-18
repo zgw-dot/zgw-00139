@@ -116,6 +116,13 @@ def run_tests():
         test_snapshot_compare_same_version_and_detail(db, test_app, test_results)
         test_snapshot_compare_data_structure(db, test_app, test_results)
         test_readme_ui_entrypoint_contract(db, test_app, test_results)
+        test_task_edit_preview_and_status_block(db, test_app, test_results)
+        test_task_edit_validate_conflict_and_inventory(db, test_app, test_results)
+        test_task_edit_diff_calculation(db, test_app, test_results)
+        test_task_edit_apply_save_snapshots(db, test_app, test_results)
+        test_task_edit_rollback_then_regenerate(db, test_app, test_results)
+        test_task_edit_persistence_after_restart(db, test_app, db_path, test_results)
+        test_task_edit_e2e_workflow(db, test_app, test_results)
     
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -173,7 +180,10 @@ def run_tests():
             raw = _m.group(0)
             # 截掉末尾可能跟着的 Markdown 语法符号 / query 参数
             raw = raw.split('?')[0]                 # 丢掉 ?query=xxx
-            raw = re.sub(r'[>*]+$', '', raw)        # 去掉尾随 '>' '*'
+            raw = re.sub(r'\*+$', '', raw)           # 去掉尾随 '*'
+            # 去掉尾随 '>'，但保留参数占位符的闭合 '>'（如 <version> 末尾的 >）
+            if not re.search(r'<\w+>$', raw):
+                raw = re.sub(r'>+$', '', raw)
             raw = raw.rstrip('.,;:|/-')
             if len(raw) < 5 or not raw.startswith('/api/'):
                 continue
@@ -3675,6 +3685,8 @@ def test_readme_ui_entrypoint_contract(db, app, results):
         assert '回滚到版本' in js, "前端JS应包含'回滚到版本'按钮文案(README回滚功能)"
         # README 撤销: 已批准应有"撤销确认"按钮
         assert '撤销确认' in js, "前端JS应包含'撤销确认'按钮文案(README撤销批准)"
+        # README 编辑功能: 草稿/待复核应有"编辑并重算"按钮
+        assert '编辑并重算' in js, "前端JS应包含'编辑并重算'按钮文案(README编辑功能)"
         # openTaskAndGenerate 辅助函数存在(从卡片直接生成方案)
         assert 'function openTaskAndGenerate' in js or 'openTaskAndGenerate' in js, "应存在openTaskAndGenerate辅助函数"
         print("  ① 前端JS按钮名称全部与README对齐")
@@ -3703,6 +3715,7 @@ def test_readme_ui_entrypoint_contract(db, app, results):
             ('批准', '✓ 批准'),
             ('添加偏差备注', '📝 添加偏差备注'),
             ('导出报告', '📊 导出报告'),
+            ('编辑并重算', '✏️ 编辑并重算'),
         ]
         for doc_name, js_name in readme_buttons:
             assert doc_name in readme, f'README应提及按钮"{doc_name}"'
@@ -3715,6 +3728,547 @@ def test_readme_ui_entrypoint_contract(db, app, results):
         import traceback as _tb
         _tb.print_exc()
         results.append({'name': 'README与GUI入口按钮名称一致性', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def _create_basic_task_and_generate(db, app):
+    from app.services.task_service import TaskService
+    from app.services.data_importer import DataImporter
+    import time
+    suffix = str(int(time.time() * 1000))[-6:]
+
+    sa = f'EditSample_A_{suffix}'
+    sb = f'EditSample_B_{suffix}'
+    pr = f'EditPrimer_{suffix}'
+    mm = f'EditMM_{suffix}'
+    h2o = f'EditH2O_{suffix}'
+    tpl_name = f'EditTpl_A_{suffix}'
+    task_name = f'EditTestTask_{suffix}'
+
+    samples_csv = f'name,volume,volume_unit,concentration,concentration_unit,description\n{sa},100,ul,50,ng/uL,样本A\n{sb},100,ul,50,ng/uL,样本B\n'
+    primers_csv = f'name,sequence,volume,volume_unit,concentration,concentration_unit,description\n{pr},ATCG,500,ul,10,uM,测试引物\n'
+    reagents_csv = f'name,type,volume,volume_unit,concentration,concentration_unit,min_pipette_volume,min_pipette_unit,description\n{mm},master_mix,5000,ul,2,x,0.5,ul,预混液\n{h2o},water,10000,ul,1,x,0.5,ul,水\n'
+    template_csv = f',1,2,3,4,5,6\nA,{sa},{sb},PC,NC,EMPTY,EMPTY\nB,{sa},{sb},PC,NC,EMPTY,EMPTY\n'
+
+    samples = DataImporter.parse_samples_csv(samples_csv)
+    for s in samples:
+        db.execute(
+            'INSERT INTO samples (name, concentration, concentration_unit, volume, volume_unit, description) VALUES (?, ?, ?, ?, ?, ?)',
+            (s['name'], s['concentration'], s['concentration_unit'], s['volume'], s['volume_unit'], s['description'])
+        )
+
+    primers = DataImporter.parse_primers_csv(primers_csv)
+    for p in primers:
+        db.execute(
+            'INSERT INTO primers (name, sequence, concentration, concentration_unit, volume, volume_unit, melting_temp, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (p['name'], p['sequence'], p['concentration'], p['concentration_unit'], p['volume'], p['volume_unit'], p.get('melting_temp'), p['description'])
+        )
+
+    reagents = DataImporter.parse_reagents_csv(reagents_csv)
+    for r in reagents:
+        db.execute(
+            'INSERT INTO reagents (name, type, concentration, concentration_unit, volume, volume_unit, min_pipette_volume, min_pipette_unit, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (r['name'], r['type'], r['concentration'], r['concentration_unit'], r['volume'], r['volume_unit'], r['min_pipette_volume'], r['min_pipette_unit'], r['description'])
+        )
+
+    tpl_data = DataImporter.parse_template_csv(template_csv)
+    cur = db.execute(
+        'INSERT INTO plate_templates (name, rows, cols, description) VALUES (?, ?, ?, ?)',
+        (tpl_name, tpl_data['rows'], tpl_data['cols'], '编辑测试模板')
+    )
+    tpl_id = cur.lastrowid
+    for w in tpl_data['wells']:
+        db.execute(
+            'INSERT INTO template_wells (template_id, well_row, well_col, well_type, sample_name, note) VALUES (?, ?, ?, ?, ?, ?)',
+            (tpl_id, w['well_row'], w['well_col'], w['well_type'], w.get('sample_name'), w.get('note', ''))
+        )
+    db.commit()
+
+    service = TaskService(db)
+    task_id = service.create_task(task_name, tpl_id, 20, 'ul')
+    service.generate_plan(task_id)
+
+    meta = {
+        'sample_a': sa,
+        'sample_b': sb,
+        'primer': pr,
+        'mm': mm,
+        'h2o': h2o,
+        'template_name': tpl_name,
+        'template_id': tpl_id,
+        'task_name': task_name,
+    }
+    return task_id, meta
+
+
+def test_task_edit_preview_and_status_block(db, app, results):
+    print("\n--- 测试40: 编辑预览 & 已批准/已撤销状态拦截 ---")
+    try:
+        from app.services.task_service import TaskService
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        service = TaskService(db)
+
+        preview = service.get_edit_preview(task_id)
+        assert preview is not None, '预览不应为None'
+        assert preview['task']['id'] == task_id, '预览任务ID应匹配'
+        assert 'current_template' in preview, '预览应包含当前模板'
+        assert 'available_templates' in preview, '预览应包含可用模板'
+        assert 'available_samples' in preview, '预览应包含可用样本'
+        assert 'current_wells' in preview, '预览应包含当前孔位'
+        print("  ① 草稿/待复核任务预览获取成功")
+
+        service.approve_task(task_id, ignore_min_pipette=True)
+        try:
+            service.get_edit_preview(task_id)
+            raise AssertionError('已批准任务应被拦截')
+        except ValueError as e:
+            assert '只读' in str(e) or '不能编辑' in str(e), f'拦截信息应包含只读/不能编辑，实际: {e}'
+        print("  ② 已批准任务编辑被拦截(409)")
+
+        service.revoke_approval(task_id)
+        try:
+            service.get_edit_preview(task_id)
+            raise AssertionError('已撤销任务应被拦截')
+        except ValueError as e:
+            assert '只读' in str(e) or '不能编辑' in str(e), f'拦截信息应包含只读/不能编辑，实际: {e}'
+        print("  ③ 已撤销任务编辑被拦截(409)")
+
+        client = app.test_client()
+        r = client.get(f'/api/tasks/{task_id}/edit')
+        assert r.status_code == 409, f'已撤销任务GET /edit应返回409，实际{r.status_code}'
+        print("  ④ API层状态拦截返回HTTP 409")
+
+        results.append({'name': '编辑预览&已批准/已撤销状态拦截', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑预览&已批准/已撤销状态拦截', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_validate_conflict_and_inventory(db, app, results):
+    print("\n--- 测试41: 编辑校验 - 孔位冲突、模板不匹配、库存不足拦截 ---")
+    try:
+        from app.services.task_service import TaskService
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        service = TaskService(db)
+        sa, sb, mm_name = meta['sample_a'], meta['sample_b'], meta['mm']
+
+        dup_wells = [
+            {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': sa},
+            {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': sb},
+        ]
+        v = service.validate_edit(task_id, {'wells': dup_wells})
+        assert v['valid'] is False, '重复孔位应校验失败'
+        assert any('冲突' in e for e in v['errors']), f'错误中应含"冲突"，实际{v["errors"]}'
+        print("  ① 孔位冲突被拦截")
+
+        v2 = service.validate_edit(task_id, {'template_id': 99999})
+        assert v2['valid'] is False, '不存在模板应校验失败'
+        assert any('模板不存在' in e for e in v2['errors']), f'错误应含"模板不存在"，实际{v2["errors"]}'
+        print("  ② 模板不存在被拦截")
+
+        bad_wells = [{'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': 'NotExistSample_xyz'}]
+        v3 = service.validate_edit(task_id, {'wells': bad_wells})
+        assert v3['valid'] is False, '引用不存在样本应校验失败'
+        assert any('样本不存在' in e for e in v3['errors']), f'错误应含"样本不存在"，实际{v3["errors"]}'
+        print("  ③ 样本不存在被拦截")
+
+        invalid_type_wells = [{'well_row': 1, 'well_col': 1, 'well_type': 'weird_type', 'sample_name': ''}]
+        v4 = service.validate_edit(task_id, {'wells': invalid_type_wells})
+        assert v4['valid'] is False, '非法孔位类型应校验失败'
+        assert any('类型无效' in e for e in v4['errors']), f'错误应含"类型无效"，实际{v4["errors"]}'
+        print("  ④ 非法孔位类型被拦截")
+
+        out_of_range = [{'well_row': 99, 'well_col': 99, 'well_type': 'empty', 'sample_name': ''}]
+        v5 = service.validate_edit(task_id, {'wells': out_of_range})
+        assert v5['valid'] is False, '超模板范围孔位应校验失败'
+        assert any('超出模板范围' in e for e in v5['errors']), f'错误应含"超出模板范围"，实际{v5["errors"]}'
+        print("  ⑤ 孔位超出模板范围被拦截")
+
+        db.execute("UPDATE reagents SET volume = 0.01, volume_unit = 'ul' WHERE type = 'master_mix'")
+        db.commit()
+        v6 = service.validate_edit(task_id, {'total_volume': 20, 'volume_unit': 'ul'})
+        assert v6['valid'] is False, 'Master Mix库存不足应校验失败'
+        assert any('库存不足' in e for e in v6['errors']), f'错误应含"库存不足"，实际{v6["errors"]}'
+        print("  ⑥ 试剂库存不足被拦截")
+        db.execute("UPDATE reagents SET volume = 5000, volume_unit = 'ul' WHERE type = 'master_mix'")
+        db.commit()
+
+        results.append({'name': '编辑校验-冲突/模板/库存拦截', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑校验-冲突/模板/库存拦截', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_diff_calculation(db, app, results):
+    print("\n--- 测试42: 编辑差异计算 - 模板/体积/孔位变更 ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.data_importer import DataImporter
+        import time
+        suffix = str(int(time.time() * 1000))[-6:]
+
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        sa, sb = meta['sample_a'], meta['sample_b']
+        old_tpl_name = meta['template_name']
+        new_tpl_name = f'EditTpl_B_{suffix}'
+
+        tpl2_csv = f',1,2,3\nA,{sa},{sb},EMPTY\nB,EMPTY,EMPTY,EMPTY\n'
+        tpl_b_data = DataImporter.parse_template_csv(tpl2_csv)
+        cur = db.execute(
+            'INSERT INTO plate_templates (name, rows, cols, description) VALUES (?, ?, ?, ?)',
+            (new_tpl_name, tpl_b_data['rows'], tpl_b_data['cols'], '差异计算测试模板')
+        )
+        tpl_b_id = cur.lastrowid
+        for w in tpl_b_data['wells']:
+            db.execute(
+                'INSERT INTO template_wells (template_id, well_row, well_col, well_type, sample_name, note) VALUES (?, ?, ?, ?, ?, ?)',
+                (tpl_b_id, w['well_row'], w['well_col'], w['well_type'], w.get('sample_name'), w.get('note', ''))
+            )
+        db.commit()
+
+        service = TaskService(db)
+        tpl_b = db.execute("SELECT id FROM plate_templates WHERE name = ?", (new_tpl_name,)).fetchone()
+
+        preview = service.get_edit_preview(task_id)
+        current_wells = [
+            {
+                'well_row': w['well_row'],
+                'well_col': w['well_col'],
+                'well_type': w['well_type'],
+                'sample_name': w.get('sample_name') or '',
+            }
+            for w in preview['current_wells']
+        ]
+        same_payload = {
+            'template_id': preview['current_template']['id'],
+            'total_volume': preview['task']['total_volume'],
+            'volume_unit': preview['task']['volume_unit'],
+            'wells': current_wells,
+        }
+        diff0 = service.calculate_edit_diff(task_id, same_payload)
+        s0 = diff0['summary']
+        assert s0['wells_added'] == 0 and s0['wells_removed'] == 0 and s0['wells_modified'] == 0, \
+            f'空编辑应无差异，实际summary={s0}'
+        print("  ① 空编辑无差异")
+
+        diff1 = service.calculate_edit_diff(task_id, {'total_volume': 50})
+        assert diff1['task_changes']['total_volume']['old'] == 20, '旧体积应为20'
+        assert diff1['task_changes']['total_volume']['new'] == 50, '新体积应为50'
+        print("  ② 总体积变更被识别")
+
+        diff2 = service.calculate_edit_diff(task_id, {'template_id': tpl_b['id']})
+        assert diff2['template_changes'], '换模板应产生template_changes'
+        assert diff2['template_changes']['old']['name'] == old_tpl_name, f'旧模板应为{old_tpl_name}'
+        assert diff2['template_changes']['new']['name'] == new_tpl_name, f'新模板应为{new_tpl_name}'
+        print("  ③ 模板变更被识别")
+
+        new_wells = [
+            {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': sb},
+            {'well_row': 1, 'well_col': 2, 'well_type': 'sample', 'sample_name': sa},
+            {'well_row': 2, 'well_col': 1, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 2, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 1, 'well_col': 3, 'well_type': 'positive_control', 'sample_name': ''},
+            {'well_row': 1, 'well_col': 4, 'well_type': 'negative_control', 'sample_name': ''},
+            {'well_row': 1, 'well_col': 5, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 1, 'well_col': 6, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 3, 'well_type': 'positive_control', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 4, 'well_type': 'negative_control', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 5, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 6, 'well_type': 'empty', 'sample_name': ''},
+        ]
+        diff3 = service.calculate_edit_diff(task_id, {'wells': new_wells})
+        s3 = diff3['summary']
+        assert s3['wells_modified'] >= 2, f'A1/A2样本互换应产生modified，实际{s3}'
+        print(f"  ④ 孔位修改差异: +{s3['wells_added']}/-{s3['wells_removed']}/~{s3['wells_modified']}")
+
+        client = app.test_client()
+        r = client.post(f'/api/tasks/{task_id}/edit/diff', json={'total_volume': 50})
+        assert r.status_code == 200, f'diff API应返回200，实际{r.status_code}'
+        data = r.get_json()
+        assert 'task_changes' in data, 'diff响应应含task_changes'
+        print("  ⑤ /edit/diff API契约正常")
+
+        results.append({'name': '编辑差异计算-模板/体积/孔位', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑差异计算-模板/体积/孔位', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_apply_save_snapshots(db, app, results):
+    print("\n--- 测试43: 编辑保存 - 自动快照、状态重置、历史记录 ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        before_snaps = snap_service.list_snapshots(task_id)
+        before_count = len(before_snaps)
+        task_before = db.execute("SELECT status, total_volume FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert task_before['status'] == 'pending_review', f'编辑前应为pending_review，实际{task_before["status"]}'
+
+        result = service.apply_edit(task_id, {'total_volume': 25}, operator='tester')
+        assert result['status'] == 'draft', '保存后状态应重置为draft'
+        assert result['pre_edit_version'] > 0, '应返回pre_edit版本号'
+        assert result['post_edit_version'] > result['pre_edit_version'], 'post版本应大于pre版本'
+        print(f"  ① 保存成功: pre_v{result['pre_edit_version']} → post_v{result['post_edit_version']}")
+
+        after_snaps = snap_service.list_snapshots(task_id)
+        assert len(after_snaps) == before_count + 2, f'应新增2个快照，实际新增{len(after_snaps) - before_count}'
+        snap_types = {s['snapshot_type'] for s in after_snaps}
+        assert 'pre_edit' in snap_types, '应包含pre_edit快照'
+        assert 'edit' in snap_types, '应包含edit快照'
+        print("  ② 编辑前后快照自动创建(pre_edit + edit)")
+
+        task_after = db.execute("SELECT status, total_volume FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert task_after['status'] == 'draft', f'保存后状态应为draft，实际{task_after["status"]}'
+        assert task_after['total_volume'] == 25, f'保存后总体积应为25，实际{task_after["total_volume"]}'
+        print("  ③ 任务状态重置为draft，配置已更新")
+
+        history = db.execute(
+            "SELECT * FROM history WHERE task_id = ? AND action_type = 'task_edited' ORDER BY id DESC",
+            (task_id,)
+        ).fetchall()
+        assert len(history) >= 1, '应写入task_edited历史记录'
+        h = history[0]
+        assert '编辑并重算' in h['detail'], f'历史detail应含"编辑并重算"，实际{h["detail"]}'
+        assert str(result['pre_edit_version']) in h['detail'], '历史应记录pre版本号'
+        assert str(result['post_edit_version']) in h['detail'], '历史应记录post版本号'
+        print("  ④ 差异摘要写入history表")
+
+        usage_after = db.execute("SELECT COUNT(*) as c FROM task_reagent_usage WHERE task_id = ?", (task_id,)).fetchone()
+        assert usage_after['c'] == 0, '编辑后旧试剂用量应清空，待重算生成'
+        wells_after = db.execute("SELECT COUNT(*) as c FROM task_wells WHERE task_id = ?", (task_id,)).fetchone()
+        assert wells_after['c'] > 0, '应保留孔位骨架'
+        print("  ⑤ 旧用量清空但孔位保留，不留下半套方案")
+
+        results.append({'name': '编辑保存-快照/状态/历史/半套方案清理', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑保存-快照/状态/历史/半套方案清理', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_rollback_then_regenerate(db, app, results):
+    print("\n--- 测试44: 编辑后回滚 & 重新生成方案 ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+
+        before = db.execute("SELECT total_volume FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        apply_res = service.apply_edit(task_id, {'total_volume': 30})
+        after_edit = db.execute("SELECT total_volume, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert after_edit['total_volume'] == 30, '编辑后体积应为30'
+        assert after_edit['status'] == 'draft', '编辑后应为draft'
+        print(f"  ① 编辑完成: 体积 {before['total_volume']}→30，状态=draft")
+
+        pre_ver = apply_res['pre_edit_version']
+        rb = snap_service.rollback_to_snapshot(task_id, pre_ver, operator='tester')
+        assert rb['rolled_back_to'] == pre_ver, f'回滚目标版本应为{pre_ver}'
+        after_rb = db.execute("SELECT total_volume, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert after_rb['total_volume'] == 20, f'回滚后体积应恢复20，实际{after_rb["total_volume"]}'
+        assert after_rb['status'] == 'pending_review', f'回滚后状态应恢复pending_review，实际{after_rb["status"]}'
+        print(f"  ② 回滚到pre_edit v{pre_ver}成功: 体积=20，状态=pending_review")
+
+        rb2 = snap_service.rollback_to_snapshot(task_id, apply_res['post_edit_version'], operator='tester')
+        after_rb2 = db.execute("SELECT total_volume, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert after_rb2['total_volume'] == 30, f'回滚到edit版体积应为30，实际{after_rb2["total_volume"]}'
+        assert after_rb2['status'] == 'draft', f'回滚到edit版状态应为draft，实际{after_rb2["status"]}'
+        print(f"  ③ 回滚到edit v{apply_res['post_edit_version']}成功，可反复切换")
+
+        gen_res = service.generate_plan(task_id)
+        assert gen_res['status'] == 'pending_review', f'重新生成后应为pending_review，实际{gen_res["status"]}'
+        wells_regen = db.execute("SELECT COUNT(*) as c FROM task_wells WHERE task_id = ?", (task_id,)).fetchone()
+        assert wells_regen['c'] > 0, '重新生成后孔位应有数据'
+        print("  ④ 回退后重新生成方案成功，全链路跑通")
+
+        results.append({'name': '编辑后回滚&重新生成方案', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑后回滚&重新生成方案', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_persistence_after_restart(db, app, db_path, results):
+    print("\n--- 测试45: 编辑数据重启持久化 ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.snapshot_service import SnapshotService
+
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        service = TaskService(db)
+        snap_service = SnapshotService(db)
+        apply_res = service.apply_edit(task_id, {'total_volume': 40}, operator='persist_test')
+
+        pre_ver = apply_res['pre_edit_version']
+        post_ver = apply_res['post_edit_version']
+
+        import sqlite3
+        conn2 = sqlite3.connect(db_path)
+        conn2.row_factory = sqlite3.Row
+        conn2.execute("PRAGMA foreign_keys = ON")
+
+        task2 = conn2.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert task2 is not None, '任务重启后应存在'
+        assert task2['total_volume'] == 40, f'重启后总体积应为40，实际{task2["total_volume"]}'
+        assert task2['status'] == 'draft', f'重启后状态应为draft，实际{task2["status"]}'
+        print("  ① 任务配置重启后保留")
+
+        snaps2 = conn2.execute(
+            "SELECT * FROM task_snapshots WHERE task_id = ? AND version IN (?, ?) ORDER BY version",
+            (task_id, pre_ver, post_ver)
+        ).fetchall()
+        assert len(snaps2) == 2, f'重启后两个快照应存在，实际{len(snaps2)}'
+        snap_types2 = {s['snapshot_type'] for s in snaps2}
+        assert 'pre_edit' in snap_types2 and 'edit' in snap_types2, '重启后快照类型应保留'
+        print("  ② 编辑快照重启后保留(pre_edit+edit)")
+
+        hist2 = conn2.execute(
+            "SELECT COUNT(*) as c FROM history WHERE task_id = ? AND action_type = 'task_edited'",
+            (task_id,)
+        ).fetchone()
+        assert hist2['c'] >= 1, '重启后编辑历史应保留'
+        print("  ③ 编辑历史记录重启后保留")
+
+        with app.app_context():
+            client = app.test_client()
+            preview_resp = client.get(f'/api/tasks/{task_id}/edit')
+            assert preview_resp.status_code == 200, f'重启后预览API应返回200，实际{preview_resp.status_code}'
+        print("  ④ 重启后API仍可查看和继续操作")
+
+        conn2.close()
+        results.append({'name': '编辑数据重启持久化', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑数据重启持久化', 'passed': False, 'error': str(e)})
+        print(f"  ❌ 失败: {e}")
+
+
+def test_task_edit_e2e_workflow(db, app, results):
+    print("\n--- 测试46: 编辑端到端全链路(API层) ---")
+    try:
+        from app.services.task_service import TaskService
+        from app.services.data_importer import DataImporter
+        from app.services.snapshot_service import SnapshotService
+        import time
+        suffix = str(int(time.time() * 1000))[-6:]
+
+        task_id, meta = _create_basic_task_and_generate(db, app)
+        sa, sb = meta['sample_a'], meta['sample_b']
+        new_tpl_name = f'EditTpl_End_{suffix}'
+
+        tpl2_csv = f',1,2,3\nA,{sa},{sb},EMPTY\nB,EMPTY,EMPTY,EMPTY\n'
+        tpl_end_data = DataImporter.parse_template_csv(tpl2_csv)
+        cur = db.execute(
+            'INSERT INTO plate_templates (name, rows, cols, description) VALUES (?, ?, ?, ?)',
+            (new_tpl_name, tpl_end_data['rows'], tpl_end_data['cols'], 'E2E测试模板')
+        )
+        tpl_end_id = cur.lastrowid
+        for w in tpl_end_data['wells']:
+            db.execute(
+                'INSERT INTO template_wells (template_id, well_row, well_col, well_type, sample_name, note) VALUES (?, ?, ?, ?, ?, ?)',
+                (tpl_end_id, w['well_row'], w['well_col'], w['well_type'], w.get('sample_name'), w.get('note', ''))
+            )
+        db.commit()
+
+        client = app.test_client()
+        tpl_end = db.execute("SELECT id FROM plate_templates WHERE name = ?", (new_tpl_name,)).fetchone()
+
+        r_preview = client.get(f'/api/tasks/{task_id}/edit')
+        assert r_preview.status_code == 200, f'GET /edit 应200，实际{r_preview.status_code}'
+        preview = r_preview.get_json()
+        assert preview['available_templates'], '预览应返回可用模板'
+        print("  ① GET /api/tasks/<id>/edit 预览成功")
+
+        new_wells = [
+            {'well_row': 1, 'well_col': 1, 'well_type': 'sample', 'sample_name': sb},
+            {'well_row': 1, 'well_col': 2, 'well_type': 'sample', 'sample_name': sa},
+            {'well_row': 1, 'well_col': 3, 'well_type': 'positive_control', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 1, 'well_type': 'negative_control', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 2, 'well_type': 'empty', 'sample_name': ''},
+            {'well_row': 2, 'well_col': 3, 'well_type': 'empty', 'sample_name': ''},
+        ]
+        edit_payload = {
+            'template_id': tpl_end['id'],
+            'total_volume': 25,
+            'volume_unit': 'ul',
+            'wells': new_wells,
+            'operator': 'e2e_user',
+        }
+
+        r_val = client.post(f'/api/tasks/{task_id}/edit/validate', json=edit_payload)
+        assert r_val.status_code == 200, f'POST /edit/validate 应200，实际{r_val.status_code}'
+        val = r_val.get_json()
+        assert val['valid'] is True, f'合法编辑应校验通过，errors={val.get("errors")}'
+        print("  ② POST /edit/validate 校验通过")
+
+        r_diff = client.post(f'/api/tasks/{task_id}/edit/diff', json=edit_payload)
+        assert r_diff.status_code == 200, f'POST /edit/diff 应200，实际{r_diff.status_code}'
+        diff = r_diff.get_json()
+        assert 'template_changes' in diff, 'diff应含template_changes'
+        print("  ③ POST /edit/diff 差异计算成功")
+
+        r_save = client.post(f'/api/tasks/{task_id}/edit', json=edit_payload)
+        assert r_save.status_code == 200, f'POST /edit 保存应200，实际{r_save.status_code}'
+        save = r_save.get_json()
+        assert save['status'] == 'draft', '保存后状态应为draft'
+        pre_ver = save['pre_edit_version']
+        post_ver = save['post_edit_version']
+        print(f"  ④ POST /edit 保存成功 v{pre_ver}→v{post_ver}")
+
+        r_snaps = client.get(f'/api/tasks/{task_id}/snapshots')
+        snaps = r_snaps.get_json()
+        snap_map = {s['version']: s for s in snaps}
+        assert snap_map[pre_ver]['snapshot_type'] == 'pre_edit', f'v{pre_ver}应是pre_edit'
+        assert snap_map[post_ver]['snapshot_type'] == 'edit', f'v{post_ver}应是edit'
+        print("  ⑤ GET /snapshots 显示编辑前后两个版本")
+
+        r_compare = client.get(
+            f'/api/tasks/{task_id}/snapshots/compare?version_a={pre_ver}&version_b={post_ver}'
+        )
+        assert r_compare.status_code == 200, '版本对比应200'
+        comp = r_compare.get_json()
+        assert comp['version_a'] == pre_ver and comp['version_b'] == post_ver
+        print("  ⑥ 编辑前后版本对比成功")
+
+        r_rb = client.post(f'/api/tasks/{task_id}/snapshots/rollback', json={'version': pre_ver})
+        assert r_rb.status_code == 200, '回滚应200'
+        rb = r_rb.get_json()
+        assert rb['rolled_back_to'] == pre_ver
+        print(f"  ⑦ POST /snapshots/rollback 回滚到v{pre_ver}成功")
+
+        r_task = client.get(f'/api/tasks/{task_id}')
+        task = r_task.get_json()['task']
+        assert task['status'] == 'pending_review', f'回滚后状态应pending_review，实际{task["status"]}'
+        print("  ⑧ 回退后状态恢复，历史链路完整")
+
+        results.append({'name': '编辑端到端全链路(API层)', 'passed': True})
+        print("  ✅ 通过")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        results.append({'name': '编辑端到端全链路(API层)', 'passed': False, 'error': str(e)})
         print(f"  ❌ 失败: {e}")
 
 

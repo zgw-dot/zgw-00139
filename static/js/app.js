@@ -11,7 +11,9 @@ const snapTypeLabels = {
     'import': '导入方案',
     'copy': '复制任务',
     'pre_approve': '批准前',
-    'manual': '手动创建'
+    'manual': '手动创建',
+    'pre_edit': '编辑前',
+    'edit': '编辑后'
 };
 
 const snapStatusLabels = {
@@ -382,12 +384,18 @@ async function showTaskDetail(taskId) {
             html += '<button class="btn-approve" onclick="approveTask()">✓ 批准</button>';
             html += '<button class="btn-reject" onclick="rejectTask()">✗ 驳回</button>';
             html += '<button class="btn-deviation" onclick="addDeviationNote()">📝 添加偏差备注</button>';
+            html += '<button class="btn-primary" onclick="openEditModal()">✏️ 编辑并重算</button>';
         }
         if (data.task.status === 'approved') {
             html += '<button class="btn-revoke" onclick="revokeTask()">↶ 撤销确认</button>';
+            html += '<button disabled title="已批准的任务只读，不可编辑">✏️ 编辑</button>';
+        }
+        if (data.task.status === 'revoked') {
+            html += '<button disabled title="已撤销的任务只读，不可编辑">✏️ 编辑</button>';
         }
         if (data.task.status === 'draft' || data.task.status === 'rejected') {
             html += '<button onclick="generatePlan()">🔬 生成方案</button>';
+            html += '<button class="btn-primary" onclick="openEditModal()">✏️ 编辑并重算</button>';
         }
         html += '<button onclick="copyCurrentTask()">📋 复制任务</button>';
         html += '<button onclick="exportTaskPlan(currentTaskId)">📤 导出方案</button>';
@@ -1292,7 +1300,13 @@ async function loadHistory() {
             'approve': '批准',
             'reject': '驳回',
             'revoke': '撤销',
-            'deviation': '偏差备注'
+            'deviation': '偏差备注',
+            'edit': '编辑',
+            'snapshot': '快照',
+            'rollback': '回滚',
+            'copy': '复制',
+            'export': '导出',
+            'import': '导入'
         };
         
         listEl.innerHTML = data.map(h => `
@@ -1466,5 +1480,602 @@ async function importTaskFile(event) {
         }
     } catch (e) {
         showToast('导入失败: ' + e.message, 'error');
+    }
+}
+
+let editState = null;
+
+async function openEditModal() {
+    if (!currentTaskId) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${currentTaskId}/edit`);
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || '获取编辑预览失败');
+        }
+        const preview = await response.json();
+
+        editState = {
+            preview: preview,
+            template_id: preview.current_template ? preview.current_template.id : null,
+            total_volume: preview.task.total_volume,
+            volume_unit: preview.task.volume_unit,
+            wells: JSON.parse(JSON.stringify(preview.current_wells || [])),
+            validation: null,
+            diff: null,
+        };
+
+        renderEditModal();
+        document.getElementById('modal').classList.remove('hidden');
+
+        await runEditValidation();
+    } catch (e) {
+        showToast(`打开编辑失败: ${e.message}`, 'error');
+        console.error(e);
+    }
+}
+
+function renderEditModal() {
+    const modalBody = document.getElementById('modal-body');
+    const es = editState;
+    const templates = es.preview.available_templates || [];
+    const samples = es.preview.available_samples || [];
+    const currentTpl = templates.find(t => t.id === es.template_id) || es.preview.current_template;
+    const rows = currentTpl ? currentTpl.rows : 8;
+    const cols = currentTpl ? currentTpl.cols : 12;
+
+    const wellMap = {};
+    (es.wells || []).forEach(w => {
+        wellMap[`${w.well_row}_${w.well_col}`] = w;
+    });
+
+    const typeLabels = {
+        'sample': '样本',
+        'positive_control': '阳性对照',
+        'negative_control': '阴性对照',
+        'empty': '空孔'
+    };
+
+    let plateHtml = '';
+    plateHtml += `<div class="well-grid" style="grid-template-columns: repeat(${cols + 1}, 1fr);">`;
+    plateHtml += '<div class="well-cell" style="background:transparent;border:none;"></div>';
+    for (let c = 1; c <= cols; c++) {
+        plateHtml += `<div class="well-cell" style="background:#f0f0f0;border:none;font-weight:bold;">${c}</div>`;
+    }
+    for (let r = 1; r <= rows; r++) {
+        plateHtml += `<div class="well-cell" style="background:#f0f0f0;border:none;font-weight:bold;">${String.fromCharCode(64 + r)}</div>`;
+        for (let c = 1; c <= cols; c++) {
+            const key = `${r}_${c}`;
+            const well = wellMap[key];
+            let wellClass = 'well-empty';
+            let wellText = '';
+            let wellType = 'empty';
+            let sampleName = '';
+
+            if (well) {
+                wellType = well.well_type || 'empty';
+                sampleName = well.sample_name || '';
+                if (wellType === 'positive_control') {
+                    wellClass = 'well-positive';
+                    wellText = 'PC';
+                } else if (wellType === 'negative_control') {
+                    wellClass = 'well-negative';
+                    wellText = 'NC';
+                } else if (wellType === 'sample') {
+                    wellClass = 'well-sample';
+                    wellText = sampleName || '';
+                }
+            }
+
+            if (wellText && wellText.length > 8) {
+                wellText = wellText.substring(0, 7) + '...';
+            }
+
+            const title = well ?
+                `${String.fromCharCode(64 + r)}${c}: ${typeLabels[wellType] || wellType}${sampleName ? ' - ' + sampleName : ''}` :
+                `${String.fromCharCode(64 + r)}${c}: 空孔`;
+
+            plateHtml += `<div class="well-cell ${wellClass}" 
+                onclick="editWell(${r}, ${c})" 
+                title="${title}"
+                style="cursor:pointer;">${wellText}</div>`;
+        }
+    }
+    plateHtml += '</div>';
+
+    let validationHtml = '';
+    if (es.validation) {
+        if (es.validation.errors && es.validation.errors.length > 0) {
+            validationHtml += '<div style="background:#ffeaea;padding:10px;border-radius:6px;border-left:3px solid #dc3545;margin-bottom:10px;">';
+            validationHtml += '<strong style="color:#dc3545;font-size:13px;">❌ 校验错误（无法保存）：</strong>';
+            validationHtml += '<ul style="margin:6px 0 0 20px;padding:0;font-size:12px;color:#333;">';
+            es.validation.errors.forEach(e => {
+                validationHtml += `<li>${e}</li>`;
+            });
+            validationHtml += '</ul></div>';
+        }
+        if (es.validation.warnings && es.validation.warnings.length > 0) {
+            validationHtml += '<div style="background:#fff8e1;padding:10px;border-radius:6px;border-left:3px solid #ffc107;margin-bottom:10px;">';
+            validationHtml += '<strong style="color:#856404;font-size:13px;">⚠️ 警告：</strong>';
+            validationHtml += '<ul style="margin:6px 0 0 20px;padding:0;font-size:12px;color:#333;">';
+            es.validation.warnings.forEach(w => {
+                validationHtml += `<li>${w}</li>`;
+            });
+            validationHtml += '</ul></div>';
+        }
+        if ((!es.validation.errors || es.validation.errors.length === 0) &&
+            (!es.validation.warnings || es.validation.warnings.length === 0)) {
+            validationHtml += '<div style="background:#e8f5e9;padding:10px;border-radius:6px;border-left:3px solid #28a745;margin-bottom:10px;">';
+            validationHtml += '<strong style="color:#28a745;font-size:13px;">✅ 校验通过，配置有效</strong>';
+            validationHtml += '</div>';
+        }
+    }
+
+    let diffHtml = '';
+    if (es.diff) {
+        const s = es.diff.summary || {};
+        const hasTaskChange = Object.keys(es.diff.task_changes || {}).length > 0;
+        const hasTplChange = Object.keys(es.diff.template_changes || {}).length > 0;
+        const hasWellChange = s.wells_added > 0 || s.wells_removed > 0 || s.wells_modified > 0;
+
+        if (hasTaskChange || hasTplChange || hasWellChange) {
+            diffHtml += '<div style="background:#f0f7ff;padding:10px;border-radius:6px;border-left:3px solid #007bff;margin-bottom:10px;">';
+            diffHtml += '<strong style="color:#007bff;font-size:13px;">📋 变更摘要：</strong>';
+            let parts = [];
+            if (es.diff.task_changes && es.diff.task_changes.total_volume) {
+                const tv = es.diff.task_changes.total_volume;
+                parts.push(`总体积: ${tv.old}→${tv.new}`);
+            }
+            if (es.diff.template_changes && es.diff.template_changes.old && es.diff.template_changes.new) {
+                parts.push(`模板: ${es.diff.template_changes.old.name}→${es.diff.template_changes.new.name}`);
+            }
+            if (s.wells_added || s.wells_removed || s.wells_modified) {
+                parts.push(`孔位: +${s.wells_added}/-${s.wells_removed}/~${s.wells_modified}`);
+            }
+            diffHtml += `<div style="font-size:12px;color:#333;margin-top:4px;">${parts.join(' | ')}</div>`;
+            diffHtml += '</div>';
+        } else {
+            diffHtml += '<div style="background:#f0f0f0;padding:10px;border-radius:6px;margin-bottom:10px;">';
+            diffHtml += '<span style="font-size:13px;color:#666;">📋 与当前配置相比无变更</span>';
+            diffHtml += '</div>';
+        }
+    }
+
+    const sampleOptions = samples.map(s =>
+        `<option value="${s.name}">${s.name}</option>`
+    ).join('');
+
+    const html = `
+        <h3>✏️ 编辑并重算任务配置</h3>
+        <p style="font-size:13px;color:#666;margin-bottom:16px;">
+            任务：<strong>${es.preview.task.name}</strong>（当前状态：${snapStatusLabels[es.preview.task.status] || es.preview.task.status}）
+        </p>
+
+        <div class="form-group">
+            <label>选择板位模板</label>
+            <select id="edit-template" onchange="onEditTemplateChange()">
+                ${templates.map(t =>
+                    `<option value="${t.id}" ${t.id === es.template_id ? 'selected' : ''}>
+                        ${t.name} (${t.rows}×${t.cols})
+                    </option>`
+                ).join('')}
+            </select>
+        </div>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            <div class="form-group" style="flex:1;min-width:150px;">
+                <label>总体系 (µL)</label>
+                <input type="number" id="edit-volume" value="${es.total_volume}" step="0.5" min="0.5" onchange="onEditVolumeChange()">
+            </div>
+        </div>
+
+        ${validationHtml}
+        ${diffHtml}
+
+        <div class="form-group" style="margin-top:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <label>孔位配置（点击孔位编辑）</label>
+                <div>
+                    <button onclick="autoFillSamples()" style="font-size:12px;padding:4px 10px;">📥 自动填充样本</button>
+                    <button onclick="clearAllWells()" style="font-size:12px;padding:4px 10px;">🧹 清空所有孔位</button>
+                </div>
+            </div>
+            <div class="legend" style="margin-bottom:8px;">
+                <div class="legend-item"><div class="legend-color legend-sample"></div>样本孔</div>
+                <div class="legend-item"><div class="legend-color legend-positive"></div>阳性对照</div>
+                <div class="legend-item"><div class="legend-color legend-negative"></div>阴性对照</div>
+                <div class="legend-item"><div class="legend-color legend-empty"></div>空孔</div>
+            </div>
+            <div style="overflow-x:auto;">
+                ${plateHtml}
+            </div>
+        </div>
+
+        <div id="edit-well-panel" class="form-group" style="display:none;margin-top:16px;padding:12px;background:#f8f9fa;border-radius:6px;">
+            <h5 id="edit-well-title" style="margin:0 0 10px 0;font-size:14px;"></h5>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+                <div>
+                    <label>孔位类型</label>
+                    <select id="edit-well-type" onchange="onEditWellTypeChange()">
+                        <option value="sample">样本</option>
+                        <option value="positive_control">阳性对照</option>
+                        <option value="negative_control">阴性对照</option>
+                        <option value="empty">空孔</option>
+                    </select>
+                </div>
+                <div id="edit-well-sample-wrap">
+                    <label>样本名称</label>
+                    <select id="edit-well-sample">
+                        <option value="">-- 选择样本 --</option>
+                        ${sampleOptions}
+                    </select>
+                </div>
+                <div>
+                    <button onclick="saveEditWell()" class="btn-submit" style="font-size:12px;padding:6px 14px;">保存该孔</button>
+                    <button onclick="cancelEditWell()" style="font-size:12px;padding:6px 14px;">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-actions" style="margin-top:20px;">
+            <button class="btn-cancel" onclick="closeModal()">取消</button>
+            <button onclick="exportEditDiff()" style="padding:8px 16px;">📤 导出差异摘要</button>
+            <button id="edit-save-btn" class="btn-submit" onclick="saveEdit()" style="padding:8px 20px;font-weight:bold;">
+                💾 保存并重算为草稿
+            </button>
+        </div>
+    `;
+
+    modalBody.innerHTML = html;
+
+    if (es.validation) {
+        const saveBtn = document.getElementById('edit-save-btn');
+        if (saveBtn) {
+            saveBtn.disabled = !es.validation.valid;
+            if (!es.validation.valid) {
+                saveBtn.title = '存在校验错误，无法保存';
+                saveBtn.style.opacity = '0.5';
+                saveBtn.style.cursor = 'not-allowed';
+            }
+        }
+    }
+}
+
+async function onEditTemplateChange() {
+    const tplId = parseInt(document.getElementById('edit-template').value);
+    editState.template_id = tplId;
+
+    const tpl = editState.preview.available_templates.find(t => t.id === tplId);
+    if (tpl) {
+        const rows = tpl.rows;
+        const cols = tpl.cols;
+        const newWells = [];
+        const oldWellMap = {};
+        (editState.wells || []).forEach(w => {
+            oldWellMap[`${w.well_row}_${w.well_col}`] = w;
+        });
+        for (let r = 1; r <= rows; r++) {
+            for (let c = 1; c <= cols; c++) {
+                const key = `${r}_${c}`;
+                if (oldWellMap[key]) {
+                    newWells.push(JSON.parse(JSON.stringify(oldWellMap[key])));
+                } else {
+                    newWells.push({ well_row: r, well_col: c, well_type: 'empty', sample_name: '' });
+                }
+            }
+        }
+        editState.wells = newWells;
+    }
+
+    renderEditModal();
+    await runEditValidation();
+}
+
+async function onEditVolumeChange() {
+    const vol = parseFloat(document.getElementById('edit-volume').value);
+    if (!isNaN(vol) && vol > 0) {
+        editState.total_volume = vol;
+    }
+    renderEditModal();
+    await runEditValidation();
+}
+
+function editWell(r, c) {
+    const key = `${r}_${c}`;
+    const existing = (editState.wells || []).find(w => w.well_row === r && w.well_col === c);
+    const well = existing || { well_row: r, well_col: c, well_type: 'empty', sample_name: '' };
+
+    editState._editingWell = { well_row: r, well_col: c };
+
+    document.getElementById('edit-well-panel').style.display = 'block';
+    document.getElementById('edit-well-title').textContent = `编辑孔位 ${String.fromCharCode(64 + r)}${c}`;
+    document.getElementById('edit-well-type').value = well.well_type || 'empty';
+    document.getElementById('edit-well-sample').value = well.sample_name || '';
+    onEditWellTypeChange();
+
+    document.getElementById('edit-well-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function onEditWellTypeChange() {
+    const type = document.getElementById('edit-well-type').value;
+    const sampleWrap = document.getElementById('edit-well-sample-wrap');
+    sampleWrap.style.display = (type === 'sample') ? 'block' : 'none';
+}
+
+function cancelEditWell() {
+    editState._editingWell = null;
+    document.getElementById('edit-well-panel').style.display = 'none';
+}
+
+async function saveEditWell() {
+    if (!editState._editingWell) return;
+
+    const { well_row, well_col } = editState._editingWell;
+    const type = document.getElementById('edit-well-type').value;
+    const sampleName = type === 'sample' ? document.getElementById('edit-well-sample').value : '';
+
+    let wells = editState.wells || [];
+    const idx = wells.findIndex(w => w.well_row === well_row && w.well_col === well_col);
+    if (idx >= 0) {
+        wells[idx].well_type = type;
+        wells[idx].sample_name = sampleName;
+    } else {
+        wells.push({ well_row, well_col, well_type: type, sample_name: sampleName });
+    }
+    editState.wells = wells;
+
+    cancelEditWell();
+    renderEditModal();
+    await runEditValidation();
+}
+
+function autoFillSamples() {
+    const samples = editState.preview.available_samples || [];
+    if (samples.length === 0) {
+        showToast('没有可用样本，请先导入样本', 'warning');
+        return;
+    }
+    const tpl = editState.preview.available_templates.find(t => t.id === editState.template_id);
+    if (!tpl) return;
+
+    let wells = editState.wells || [];
+    let sampleIdx = 0;
+
+    for (let r = 1; r <= tpl.rows; r++) {
+        for (let c = 1; c <= tpl.cols; c++) {
+            const idx = wells.findIndex(w => w.well_row === r && w.well_col === c);
+            if (idx >= 0) {
+                if (wells[idx].well_type === 'empty' || wells[idx].well_type === 'sample') {
+                    if (sampleIdx < samples.length) {
+                        wells[idx].well_type = 'sample';
+                        wells[idx].sample_name = samples[sampleIdx].name;
+                        sampleIdx++;
+                    }
+                }
+            } else {
+                if (sampleIdx < samples.length) {
+                    wells.push({
+                        well_row: r, well_col: c,
+                        well_type: 'sample',
+                        sample_name: samples[sampleIdx].name
+                    });
+                    sampleIdx++;
+                }
+            }
+        }
+    }
+    editState.wells = wells;
+    renderEditModal();
+    runEditValidation();
+    showToast(`已自动填充 ${sampleIdx} 个样本孔`, 'success');
+}
+
+function clearAllWells() {
+    if (!confirm('确定清空所有孔位设置？')) return;
+    const tpl = editState.preview.available_templates.find(t => t.id === editState.template_id);
+    if (!tpl) return;
+
+    const wells = [];
+    for (let r = 1; r <= tpl.rows; r++) {
+        for (let c = 1; c <= tpl.cols; c++) {
+            wells.push({ well_row: r, well_col: c, well_type: 'empty', sample_name: '' });
+        }
+    }
+    editState.wells = wells;
+    renderEditModal();
+    runEditValidation();
+    showToast('已清空所有孔位', 'success');
+}
+
+async function runEditValidation() {
+    const payload = {
+        template_id: editState.template_id,
+        total_volume: editState.total_volume,
+        volume_unit: editState.volume_unit,
+        wells: editState.wells,
+    };
+
+    try {
+        const [valResp, diffResp] = await Promise.all([
+            fetch(`${API_BASE}/tasks/${currentTaskId}/edit/validate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }),
+            fetch(`${API_BASE}/tasks/${currentTaskId}/edit/diff`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+        ]);
+
+        if (valResp.ok) {
+            editState.validation = await valResp.json();
+        }
+        if (diffResp.ok) {
+            editState.diff = await diffResp.json();
+        }
+
+        renderEditModal();
+    } catch (e) {
+        console.error('校验失败', e);
+    }
+}
+
+function exportEditDiff() {
+    if (!editState || !editState.diff) {
+        showToast('暂无差异数据可导出', 'warning');
+        return;
+    }
+
+    const diff = editState.diff;
+    const lines = [];
+    lines.push('=== 编辑差异摘要 ===');
+    lines.push(`任务: ${editState.preview.task.name}`);
+    lines.push(`导出时间: ${new Date().toLocaleString()}`);
+    lines.push('');
+
+    if (diff.task_changes && Object.keys(diff.task_changes).length > 0) {
+        lines.push('【基本信息变更】');
+        const labelMap = { 'total_volume': '总体积', 'volume_unit': '体积单位' };
+        for (const [k, v] of Object.entries(diff.task_changes)) {
+            lines.push(`  ${labelMap[k] || k}: ${v.old} → ${v.new}`);
+        }
+        lines.push('');
+    }
+
+    if (diff.template_changes && Object.keys(diff.template_changes).length > 0) {
+        lines.push('【模板变更】');
+        const old = diff.template_changes.old;
+        const nw = diff.template_changes.new;
+        if (old) lines.push(`  旧模板: ${old.name} (${old.rows}×${old.cols})`);
+        if (nw) lines.push(`  新模板: ${nw.name} (${nw.rows}×${nw.cols})`);
+        lines.push('');
+    }
+
+    const s = diff.summary || {};
+    lines.push(`【孔位变更摘要】新增 ${s.wells_added} / 删除 ${s.wells_removed} / 修改 ${s.wells_modified}`);
+    lines.push('');
+
+    const renderWell = (w) => {
+        const typeLabels = { 'sample': '样本', 'positive_control': '阳性对照', 'negative_control': '阴性对照', 'empty': '空孔' };
+        const data = w.data || w;
+        return `${w.well}: ${typeLabels[data.well_type] || data.well_type}${data.sample_name ? ' [' + data.sample_name + ']' : ''}`;
+    };
+
+    if (diff.well_changes && diff.well_changes.added && diff.well_changes.added.length > 0) {
+        lines.push('【新增孔位】');
+        diff.well_changes.added.forEach(w => lines.push(`  + ${renderWell(w)}`));
+        lines.push('');
+    }
+    if (diff.well_changes && diff.well_changes.removed && diff.well_changes.removed.length > 0) {
+        lines.push('【删除孔位】');
+        diff.well_changes.removed.forEach(w => lines.push(`  - ${renderWell(w)}`));
+        lines.push('');
+    }
+    if (diff.well_changes && diff.well_changes.modified && diff.well_changes.modified.length > 0) {
+        lines.push('【修改孔位】');
+        const fieldLabels = { 'well_type': '类型', 'sample_name': '样本' };
+        const typeLabels = { 'sample': '样本', 'positive_control': '阳性对照', 'negative_control': '阴性对照', 'empty': '空孔' };
+        diff.well_changes.modified.forEach(w => {
+            const parts = [];
+            for (const [fk, fv] of Object.entries(w.fields || {})) {
+                const label = fieldLabels[fk] || fk;
+                const fmt = (v) => fk === 'well_type' ? (typeLabels[v] || v) : (v || '(空)');
+                parts.push(`${label}: ${fmt(fv.old)} → ${fmt(fv.new)}`);
+            }
+            lines.push(`  ~ ${w.well}: ${parts.join(', ')}`);
+        });
+        lines.push('');
+    }
+
+    if (editState.validation && editState.validation.errors && editState.validation.errors.length > 0) {
+        lines.push('【校验错误】');
+        editState.validation.errors.forEach(e => lines.push(`  ❌ ${e}`));
+        lines.push('');
+    }
+    if (editState.validation && editState.validation.warnings && editState.validation.warnings.length > 0) {
+        lines.push('【校验警告】');
+        editState.validation.warnings.forEach(w => lines.push(`  ⚠️  ${w}`));
+        lines.push('');
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${editState.preview.task.name}_编辑差异_${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    showToast('差异摘要已导出', 'success');
+}
+
+async function saveEdit() {
+    if (!editState) return;
+
+    if (editState.validation && !editState.validation.valid) {
+        showToast('存在校验错误，无法保存，请先修正', 'error');
+        return;
+    }
+
+    const hasChanges = editState.diff && (
+        Object.keys(editState.diff.task_changes || {}).length > 0 ||
+        Object.keys(editState.diff.template_changes || {}).length > 0 ||
+        (editState.diff.summary && (editState.diff.summary.wells_added > 0 ||
+            editState.diff.summary.wells_removed > 0 ||
+            editState.diff.summary.wells_modified > 0))
+    );
+
+    if (!hasChanges) {
+        if (!confirm('与当前配置相比没有检测到变更，仍然保存吗？')) {
+            return;
+        }
+    }
+
+    const confirmMsg = [
+        '确认保存编辑并重算？',
+        '保存后：',
+        '  · 任务状态将重置为「草稿」',
+        '  · 编辑前后都会自动创建快照，可随时回滚',
+        '  · 需要重新生成配液方案才能批准'
+    ].join('\n');
+
+    if (!confirm(confirmMsg)) return;
+
+    const payload = {
+        template_id: editState.template_id,
+        total_volume: editState.total_volume,
+        volume_unit: editState.volume_unit,
+        wells: editState.wells,
+        operator: 'user'
+    };
+
+    try {
+        const response = await fetch(`${API_BASE}/tasks/${currentTaskId}/edit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || '保存失败');
+        }
+
+        const result = await response.json();
+        showToast(
+            `保存成功！编辑前 v${result.pre_edit_version} → 编辑后 v${result.post_edit_version}，已重置为草稿`,
+            'success'
+        );
+        closeModal();
+        showTaskDetail(currentTaskId);
+        loadTasks();
+        loadStats();
+        loadHistory();
+    } catch (e) {
+        showToast(`保存失败: ${e.message}`, 'error');
+        console.error(e);
     }
 }
