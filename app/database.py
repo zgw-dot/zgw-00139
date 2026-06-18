@@ -304,6 +304,49 @@ def init_db(app):
         CREATE INDEX IF NOT EXISTS idx_ledger_event ON batch_trace_ledger(event_type);
         CREATE INDEX IF NOT EXISTS idx_ledger_created ON batch_trace_ledger(created_at);
         CREATE INDEX IF NOT EXISTS idx_conflicts_batch ON batch_import_conflicts(reagent_name, batch_number);
+
+        CREATE TABLE IF NOT EXISTS experiment_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            template_id INTEGER,
+            total_volume REAL,
+            volume_unit TEXT DEFAULT 'ul',
+            primer_id INTEGER,
+            master_mix_id INTEGER,
+            water_id INTEGER,
+            deviation_note_template TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS experiment_preset_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            preset_id INTEGER,
+            action TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            detail TEXT,
+            operator TEXT DEFAULT 'system',
+            snapshot TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (preset_id) REFERENCES experiment_presets(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS task_preset_references (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            preset_id INTEGER,
+            preset_name TEXT NOT NULL,
+            preset_snapshot TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (preset_id) REFERENCES experiment_presets(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_preset_history ON experiment_preset_history(preset_id);
+        CREATE INDEX IF NOT EXISTS idx_task_preset_task ON task_preset_references(task_id);
+        CREATE INDEX IF NOT EXISTS idx_task_preset_preset ON task_preset_references(preset_id);
     ''')
     
     # schema 迁移：补齐旧库缺少的列

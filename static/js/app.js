@@ -41,6 +41,7 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         });
     });
+    loadExperimentPresets();
 });
 
 function setupTabs() {
@@ -131,7 +132,7 @@ async function loadStats() {
         const response = await fetch(`${API_BASE}/stats`);
         const data = await response.json();
         document.getElementById('stats-info').textContent = 
-            `样本: ${data.samples} | 引物: ${data.primers} | 试剂: ${data.reagents} | 模板: ${data.templates} | 任务: ${data.tasks} | 已批准: ${data.approved_tasks}`;
+            `样本: ${data.samples} | 引物: ${data.primers} | 试剂: ${data.reagents} | 模板: ${data.templates} | 预设: ${data.experiment_presets || 0} | 任务: ${data.tasks} | 已批准: ${data.approved_tasks}`;
     } catch (e) {
         console.error('加载统计失败', e);
     }
@@ -439,6 +440,7 @@ async function showTaskDetail(taskId) {
             html += '<button class="btn-primary" onclick="openEditModal()">✏️ 编辑并重算</button>';
         }
         html += '<button onclick="copyCurrentTask()">📋 复制任务</button>';
+        html += '<button onclick="saveTaskAsPreset()">💾 另存为预设</button>';
         html += '<button onclick="exportTaskPlan(currentTaskId)">📤 导出方案</button>';
         html += '<button onclick="exportReport()">📊 导出报告</button>';
         html += '</div>';
@@ -2580,5 +2582,438 @@ async function saveEdit() {
     } catch (e) {
         showToast(`保存失败: ${e.message}`, 'error');
         console.error(e);
+    }
+}
+
+async function loadExperimentPresets() {
+    try {
+        const keyword = document.getElementById('preset-search').value.trim();
+        const isEnabled = document.getElementById('preset-enabled-filter').value;
+        let url = `${API_BASE}/experiment-presets?`;
+        if (keyword) url += `keyword=${encodeURIComponent(keyword)}&`;
+        if (isEnabled !== '') url += `is_enabled=${isEnabled}&`;
+
+        const response = await fetch(url);
+        const data = await response.json();
+        const listEl = document.getElementById('preset-list');
+
+        if (!data.presets || data.presets.length === 0) {
+            listEl.innerHTML = '<p class="empty">暂无预设</p>';
+            return;
+        }
+
+        listEl.innerHTML = data.presets.map(p => {
+            const enabledLabel = p.is_enabled ? '<span style="color:#28a745;">✅ 启用</span>' : '<span style="color:#dc3545;">⛔ 停用</span>';
+            const depCheck = p.dependency_check || {};
+            const depBadge = depCheck.valid ? '<span style="color:#28a745;font-size:11px;">依赖完整</span>' : '<span style="color:#dc3545;font-size:11px;">⚠️ 依赖缺失</span>';
+            const refCount = p.task_reference_count || 0;
+
+            let infoParts = [];
+            if (p.total_volume) infoParts.push(`总体系: ${p.total_volume} ${p.volume_unit || 'ul'}`);
+            if (p.deviation_note_template) infoParts.push(`偏差模板: ${p.deviation_note_template.substring(0, 30)}${p.deviation_note_template.length > 30 ? '...' : ''}`);
+            if (refCount > 0) infoParts.push(`引用任务: ${refCount}`);
+
+            let actionsHtml = '';
+            if (p.is_enabled) {
+                actionsHtml += `<button onclick="applyExperimentPreset(${p.id})" style="font-size:11px;padding:3px 8px;">🚀 创建任务</button>`;
+            }
+            actionsHtml += `<button onclick="copyExperimentPreset(${p.id})" style="font-size:11px;padding:3px 8px;">📋 复制</button>`;
+            actionsHtml += `<button onclick="showEditPresetModal(${p.id})" style="font-size:11px;padding:3px 8px;">✏️ 编辑</button>`;
+            if (p.is_enabled) {
+                actionsHtml += `<button onclick="togglePresetEnabled(${p.id}, false)" style="font-size:11px;padding:3px 8px;">⛔ 停用</button>`;
+            } else {
+                actionsHtml += `<button onclick="togglePresetEnabled(${p.id}, true)" style="font-size:11px;padding:3px 8px;">✅ 启用</button>`;
+            }
+            actionsHtml += `<button onclick="deleteExperimentPreset(${p.id})" style="font-size:11px;padding:3px 8px;color:#dc3545;">🗑️ 删除</button>`;
+
+            return `
+                <div class="task-card" style="border-left:4px solid ${p.is_enabled ? '#28a745' : '#6c757d'};">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <strong>${p.name}</strong>
+                            ${enabledLabel} ${depBadge}
+                            ${p.description ? `<div style="font-size:12px;color:#666;margin-top:2px;">${p.description}</div>` : ''}
+                            ${infoParts.length > 0 ? `<div style="font-size:11px;color:#888;margin-top:2px;">${infoParts.join(' | ')}</div>` : ''}
+                        </div>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">
+                            ${actionsHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error('加载预设列表失败', e);
+    }
+}
+
+async function showCreatePresetModal() {
+    const [templates, primers, reagents] = await Promise.all([
+        fetch(`${API_BASE}/templates`).then(r => r.json()),
+        fetch(`${API_BASE}/primers`).then(r => r.json()),
+        fetch(`${API_BASE}/reagents`).then(r => r.json()),
+    ]);
+
+    const masterMixReagents = reagents.filter(r => r.type === 'master_mix');
+    const waterReagents = reagents.filter(r => r.type === 'water');
+
+    const modalBody = document.getElementById('modal-body');
+    modalBody.innerHTML = `
+        <h3>新建实验方案预设</h3>
+        <div class="form-group">
+            <label>预设名称 *</label>
+            <input type="text" id="preset-name" placeholder="请输入预设名称">
+        </div>
+        <div class="form-group">
+            <label>描述</label>
+            <input type="text" id="preset-description" placeholder="可选描述">
+        </div>
+        <div class="form-group">
+            <label>板位模板</label>
+            <select id="preset-template">
+                <option value="">-- 选择模板 --</option>
+                ${templates.map(t => `<option value="${t.id}">${t.name} (${t.rows}×${t.cols})</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>总体系 (µL)</label>
+            <input type="number" id="preset-total-volume" value="20" step="0.5">
+        </div>
+        <div class="form-group">
+            <label>引物</label>
+            <select id="preset-primer">
+                <option value="">-- 选择引物 --</option>
+                ${primers.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Master Mix 试剂</label>
+            <select id="preset-master-mix">
+                <option value="">-- 选择 --</option>
+                ${masterMixReagents.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>水试剂</label>
+            <select id="preset-water">
+                <option value="">-- 选择 --</option>
+                ${waterReagents.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>偏差备注模板</label>
+            <textarea id="preset-deviation-note" rows="3" placeholder="可选：创建任务时自动填入的偏差备注"></textarea>
+        </div>
+        <div class="form-actions">
+            <button class="btn-cancel" onclick="closeModal()">取消</button>
+            <button class="btn-submit" onclick="saveNewPreset()">创建预设</button>
+        </div>
+    `;
+    document.getElementById('modal').classList.remove('hidden');
+}
+
+async function saveNewPreset() {
+    const name = document.getElementById('preset-name').value.trim();
+    if (!name) { showToast('请输入预设名称', 'error'); return; }
+
+    const payload = {
+        name,
+        description: document.getElementById('preset-description').value.trim() || null,
+        template_id: parseInt(document.getElementById('preset-template').value) || null,
+        total_volume: parseFloat(document.getElementById('preset-total-volume').value) || null,
+        volume_unit: 'ul',
+        primer_id: parseInt(document.getElementById('preset-primer').value) || null,
+        master_mix_id: parseInt(document.getElementById('preset-master-mix').value) || null,
+        water_id: parseInt(document.getElementById('preset-water').value) || null,
+        deviation_note_template: document.getElementById('preset-deviation-note').value.trim() || null,
+    };
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('预设创建成功', 'success');
+            closeModal();
+            loadExperimentPresets();
+            loadStats();
+        } else {
+            if (data.conflict === 'name_exists') {
+                showToast('预设名称已存在', 'error');
+            } else {
+                showToast('创建失败: ' + data.error, 'error');
+            }
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'error');
+    }
+}
+
+async function showEditPresetModal(presetId) {
+    const [presetResp, templates, primers, reagents] = await Promise.all([
+        fetch(`${API_BASE}/experiment-presets/${presetId}`).then(r => r.json()),
+        fetch(`${API_BASE}/templates`).then(r => r.json()),
+        fetch(`${API_BASE}/primers`).then(r => r.json()),
+        fetch(`${API_BASE}/reagents`).then(r => r.json()),
+    ]);
+
+    const p = presetResp;
+    const masterMixReagents = reagents.filter(r => r.type === 'master_mix');
+    const waterReagents = reagents.filter(r => r.type === 'water');
+
+    const modalBody = document.getElementById('modal-body');
+    modalBody.innerHTML = `
+        <h3>编辑实验方案预设</h3>
+        <div class="form-group">
+            <label>预设名称 *</label>
+            <input type="text" id="edit-preset-name" value="${p.name || ''}">
+        </div>
+        <div class="form-group">
+            <label>描述</label>
+            <input type="text" id="edit-preset-description" value="${p.description || ''}">
+        </div>
+        <div class="form-group">
+            <label>板位模板</label>
+            <select id="edit-preset-template">
+                <option value="">-- 选择模板 --</option>
+                ${templates.map(t => `<option value="${t.id}" ${t.id === p.template_id ? 'selected' : ''}>${t.name} (${t.rows}×${t.cols})</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>总体系 (µL)</label>
+            <input type="number" id="edit-preset-total-volume" value="${p.total_volume || 20}" step="0.5">
+        </div>
+        <div class="form-group">
+            <label>引物</label>
+            <select id="edit-preset-primer">
+                <option value="">-- 选择引物 --</option>
+                ${primers.map(pr => `<option value="${pr.id}" ${pr.id === p.primer_id ? 'selected' : ''}>${pr.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Master Mix 试剂</label>
+            <select id="edit-preset-master-mix">
+                <option value="">-- 选择 --</option>
+                ${masterMixReagents.map(r => `<option value="${r.id}" ${r.id === p.master_mix_id ? 'selected' : ''}>${r.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>水试剂</label>
+            <select id="edit-preset-water">
+                <option value="">-- 选择 --</option>
+                ${waterReagents.map(r => `<option value="${r.id}" ${r.id === p.water_id ? 'selected' : ''}>${r.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>偏差备注模板</label>
+            <textarea id="edit-preset-deviation-note" rows="3">${p.deviation_note_template || ''}</textarea>
+        </div>
+        <div class="form-actions">
+            <button class="btn-cancel" onclick="closeModal()">取消</button>
+            <button class="btn-submit" onclick="saveEditPreset(${presetId})">保存修改</button>
+        </div>
+    `;
+    document.getElementById('modal').classList.remove('hidden');
+}
+
+async function saveEditPreset(presetId) {
+    const name = document.getElementById('edit-preset-name').value.trim();
+    if (!name) { showToast('请输入预设名称', 'error'); return; }
+
+    const payload = {
+        name,
+        description: document.getElementById('edit-preset-description').value.trim() || null,
+        template_id: parseInt(document.getElementById('edit-preset-template').value) || null,
+        total_volume: parseFloat(document.getElementById('edit-preset-total-volume').value) || null,
+        volume_unit: 'ul',
+        primer_id: parseInt(document.getElementById('edit-preset-primer').value) || null,
+        master_mix_id: parseInt(document.getElementById('edit-preset-master-mix').value) || null,
+        water_id: parseInt(document.getElementById('edit-preset-water').value) || null,
+        deviation_note_template: document.getElementById('edit-preset-deviation-note').value.trim() || null,
+    };
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/${presetId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('预设更新成功', 'success');
+            closeModal();
+            loadExperimentPresets();
+        } else {
+            if (data.conflict === 'name_exists') {
+                showToast('预设名称已存在', 'error');
+            } else {
+                showToast('更新失败: ' + data.error, 'error');
+            }
+        }
+    } catch (e) {
+        showToast('更新失败: ' + e.message, 'error');
+    }
+}
+
+async function applyExperimentPreset(presetId) {
+    const taskName = prompt('请输入任务名称（留空则自动生成）:');
+    if (taskName === null) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/${presetId}/apply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_name: taskName || undefined }),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast(`从预设创建任务成功 (任务 #${data.task_id})`, 'success');
+            loadTasks();
+            loadStats();
+        } else if (response.status === 422) {
+            const missing = (data.missing || []).map(m => m.message).join('; ');
+            showToast(`依赖缺失，无法创建: ${missing}`, 'error');
+        } else {
+            showToast('创建失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'error');
+    }
+}
+
+async function copyExperimentPreset(presetId) {
+    const newName = prompt('请输入新预设名称（留空自动生成）:');
+    if (newName === null) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/${presetId}/copy`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName || undefined }),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('预设复制成功', 'success');
+            loadExperimentPresets();
+        } else {
+            showToast('复制失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('复制失败: ' + e.message, 'error');
+    }
+}
+
+async function togglePresetEnabled(presetId, enable) {
+    const action = enable ? 'enable' : 'disable';
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/${presetId}/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast(`预设已${enable ? '启用' : '停用'}`, 'success');
+            loadExperimentPresets();
+        } else {
+            showToast('操作失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('操作失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteExperimentPreset(presetId) {
+    if (!confirm('确定要删除该预设？如果预设已被任务引用则无法删除。')) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/${presetId}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('预设已删除', 'success');
+            loadExperimentPresets();
+            loadStats();
+        } else if (response.status === 409) {
+            showToast('删除失败: ' + data.error, 'error');
+        } else {
+            showToast('删除失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+async function saveTaskAsPreset() {
+    if (!currentTaskId) return;
+    const presetName = prompt('请输入预设名称:');
+    if (!presetName) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/save-from-task`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: currentTaskId, preset_name: presetName }),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('已另存为预设', 'success');
+            loadExperimentPresets();
+            loadStats();
+        } else {
+            if (data.conflict === 'name_exists') {
+                showToast('预设名称已存在，请换一个名称', 'error');
+            } else {
+                showToast('保存失败: ' + data.error, 'error');
+            }
+        }
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+function exportPresetsJson() {
+    window.open(`${API_BASE}/experiment-presets/export/json`);
+}
+
+function exportPresetsCsv() {
+    window.open(`${API_BASE}/experiment-presets/export/csv`);
+}
+
+async function importPresetsFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    event.target.value = '';
+
+    const conflictMode = confirm(
+        '导入同名预设冲突时如何处理？\n\n' +
+        '确定 = reject（拒绝，保留原有）\n' +
+        '取消 = rename（自动重命名导入）'
+    ) ? 'reject' : 'rename';
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('conflict_mode', conflictMode);
+
+    try {
+        const response = await fetch(`${API_BASE}/experiment-presets/import`, {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await response.json();
+        if (response.ok) {
+            const msg = `导入完成: 新增 ${data.imported}, 重命名 ${data.renamed}, 覆盖 ${data.overwritten}, 跳过 ${data.skipped}`;
+            showToast(msg, 'success');
+            loadExperimentPresets();
+            loadStats();
+        } else {
+            showToast('导入失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('导入失败: ' + e.message, 'error');
     }
 }

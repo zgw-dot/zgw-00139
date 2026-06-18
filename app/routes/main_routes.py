@@ -28,5 +28,7 @@ def stats():
     stats['tasks'] = db.execute('SELECT COUNT(*) as cnt FROM tasks').fetchone()['cnt']
     stats['approved_tasks'] = db.execute("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'approved'").fetchone()['cnt']
     stats['history'] = db.execute('SELECT COUNT(*) as cnt FROM history').fetchone()['cnt']
+    stats['experiment_presets'] = db.execute('SELECT COUNT(*) as cnt FROM experiment_presets').fetchone()['cnt']
+    stats['experiment_presets_enabled'] = db.execute('SELECT COUNT(*) as cnt FROM experiment_presets WHERE is_enabled = 1').fetchone()['cnt']
     
     return jsonify(stats)
