@@ -347,6 +347,64 @@ def init_db(app):
         CREATE INDEX IF NOT EXISTS idx_preset_history ON experiment_preset_history(preset_id);
         CREATE INDEX IF NOT EXISTS idx_task_preset_task ON task_preset_references(task_id);
         CREATE INDEX IF NOT EXISTS idx_task_preset_preset ON task_preset_references(preset_id);
+
+        CREATE TABLE IF NOT EXISTS protocol_lock_packages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            template_id INTEGER,
+            template_name TEXT,
+            template_rows INTEGER,
+            template_cols INTEGER,
+            total_volume REAL,
+            volume_unit TEXT DEFAULT 'ul',
+            primer_id INTEGER,
+            primer_name TEXT,
+            master_mix_id INTEGER,
+            master_mix_name TEXT,
+            water_id INTEGER,
+            water_name TEXT,
+            deviation_note TEXT,
+            frozen_params TEXT NOT NULL DEFAULT '{}',
+            source_task_id INTEGER,
+            source_task_name TEXT,
+            source_task_status TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (template_id) REFERENCES plate_templates(id),
+            FOREIGN KEY (primer_id) REFERENCES primers(id),
+            FOREIGN KEY (master_mix_id) REFERENCES reagents(id),
+            FOREIGN KEY (water_id) REFERENCES reagents(id),
+            FOREIGN KEY (source_task_id) REFERENCES tasks(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS lock_package_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id INTEGER,
+            action TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            detail TEXT,
+            operator TEXT DEFAULT 'system',
+            snapshot TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (package_id) REFERENCES protocol_lock_packages(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS lock_package_task_references (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            package_id INTEGER,
+            package_name TEXT NOT NULL,
+            package_snapshot TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (package_id) REFERENCES protocol_lock_packages(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_lock_pkg_history ON lock_package_history(package_id);
+        CREATE INDEX IF NOT EXISTS idx_lock_pkg_task ON lock_package_task_references(task_id);
+        CREATE INDEX IF NOT EXISTS idx_lock_pkg_pkg ON lock_package_task_references(package_id);
     ''')
     
     # schema 迁移：补齐旧库缺少的列
