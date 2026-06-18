@@ -31,7 +31,7 @@ class TaskService:
         return task_id
     
     def generate_plan(self, task_id, sample_assignments=None, primer_id=None, 
-                      master_mix_id=None, water_id=None):
+                      master_mix_id=None, water_id=None, _from_lock_package=False):
         task = self.db.execute(
             'SELECT * FROM tasks WHERE id = ?', (task_id,)
         ).fetchone()
@@ -44,6 +44,19 @@ class TaskService:
         
         if not UnitConverter.is_volume_unit(task['volume_unit']):
             raise ValueError(f"任务的体积单位无效: {task['volume_unit']}")
+
+        from app.services.protocol_lock_package_service import ProtocolLockPackageService
+        lock_svc = ProtocolLockPackageService(self.db)
+        task_frozen = lock_svc.get_task_frozen_params(task_id)
+        strict_mode = _from_lock_package or (task_frozen is not None)
+
+        if task_frozen:
+            if primer_id is None:
+                primer_id = task_frozen.get('primer_id')
+            if master_mix_id is None:
+                master_mix_id = task_frozen.get('master_mix_id')
+            if water_id is None:
+                water_id = task_frozen.get('water_id')
         
         template = self.db.execute(
             'SELECT * FROM plate_templates WHERE id = ?', (task['template_id'],)
@@ -71,12 +84,32 @@ class TaskService:
         primer = None
         if primer_id:
             primer = self.db.execute('SELECT * FROM primers WHERE id = ?', (primer_id,)).fetchone()
+            if not primer and strict_mode:
+                raise ValueError(
+                    f'锁定的引物 #{primer_id} 不存在或已被删除，无法静默回退到默认引物。'
+                    f'请更新锁定包或手动指定有效引物。'
+                )
+        elif strict_mode:
+            raise ValueError(
+                '未指定引物，且任务关联了锁定包（严格模式）。请确保锁定包配置了 primer_id，'
+                '或手动指定引物参数。'
+            )
         elif all_primers:
             primer = all_primers[0]
         
         master_mix = None
         if master_mix_id:
             master_mix = self.db.execute('SELECT * FROM reagents WHERE id = ?', (master_mix_id,)).fetchone()
+            if not master_mix and strict_mode:
+                raise ValueError(
+                    f'锁定的 Master Mix #{master_mix_id} 不存在或已被删除，无法静默回退。'
+                    f'请更新锁定包或手动指定有效 Master Mix。'
+                )
+        elif strict_mode:
+            raise ValueError(
+                '未指定 Master Mix，且任务关联了锁定包（严格模式）。请确保锁定包配置了 master_mix_id，'
+                '或手动指定 Master Mix 参数。'
+            )
         else:
             for r in all_reagents:
                 if r['type'] == 'master_mix':
@@ -86,6 +119,16 @@ class TaskService:
         water = None
         if water_id:
             water = self.db.execute('SELECT * FROM reagents WHERE id = ?', (water_id,)).fetchone()
+            if not water and strict_mode:
+                raise ValueError(
+                    f'锁定的水试剂 #{water_id} 不存在或已被删除，无法静默回退。'
+                    f'请更新锁定包或手动指定有效水试剂。'
+                )
+        elif strict_mode:
+            raise ValueError(
+                '未指定水试剂，且任务关联了锁定包（严格模式）。请确保锁定包配置了 water_id，'
+                '或手动指定水试剂参数。'
+            )
         else:
             for r in all_reagents:
                 if r['type'] == 'water':

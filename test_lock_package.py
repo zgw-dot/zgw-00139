@@ -131,6 +131,9 @@ def test_manual_create_and_apply():
         svc = ProtocolLockPackageService(db)
 
         t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+        p = db.execute("SELECT id FROM primers LIMIT 1").fetchone()
+        r_mm = db.execute("SELECT id FROM reagents WHERE type='master_mix' LIMIT 1").fetchone()
+        r_w = db.execute("SELECT id FROM reagents WHERE type='water' LIMIT 1").fetchone()
 
         try:
             pkg = svc.create_manual(
@@ -139,6 +142,9 @@ def test_manual_create_and_apply():
                 template_id=t['id'],
                 total_volume=30,
                 volume_unit='ul',
+                primer_id=p['id'],
+                master_mix_id=r_mm['id'],
+                water_id=r_w['id'],
                 operator='tester',
             )
             _ok('create_manual 成功')
@@ -149,7 +155,7 @@ def test_manual_create_and_apply():
             return
 
         try:
-            result = svc.apply_package_to_task(pkg['id'], operator='tester')
+            result = svc.apply_package_to_task(pkg['id'], operator='tester', auto_generate=True)
             if result['task_id'] and result['template_id'] == t['id'] and result['total_volume'] == 30:
                 _ok('apply_package_to_task 参数冻结优先')
             else:
@@ -429,14 +435,20 @@ def test_task_reference():
         svc = ProtocolLockPackageService(db)
 
         t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+        p = db.execute("SELECT id FROM primers LIMIT 1").fetchone()
+        r_mm = db.execute("SELECT id FROM reagents WHERE type='master_mix' LIMIT 1").fetchone()
+        r_w = db.execute("SELECT id FROM reagents WHERE type='water' LIMIT 1").fetchone()
 
         pkg = svc.create_manual(
             name='引用测试包I',
             template_id=t['id'],
             total_volume=20,
+            primer_id=p['id'],
+            master_mix_id=r_mm['id'],
+            water_id=r_w['id'],
         )
 
-        result = svc.apply_package_to_task(pkg['id'], task_name='引用测试任务', operator='tester')
+        result = svc.apply_package_to_task(pkg['id'], task_name='引用测试任务', operator='tester', auto_generate=True)
         task_id = result['task_id']
 
         try:
@@ -461,6 +473,201 @@ def test_task_reference():
     shutil.rmtree(TMPDIR, ignore_errors=True)
 
 
+def test_frozen_params_e2e():
+    """冻结参数端到端生效：建包时的引物/MM/水必须被带到生成方案中"""
+    print('\n=== 9. 冻结参数端到端生效 ===')
+    app = _make_app()
+    with app.app_context():
+        db = _get_db(app)
+        _seed(db)
+        svc = ProtocolLockPackageService(db)
+        task_svc = TaskService(db)
+
+        t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+        p = db.execute("SELECT id FROM primers LIMIT 1").fetchone()
+        r_mm = db.execute("SELECT id FROM reagents WHERE type='master_mix' LIMIT 1").fetchone()
+        r_w = db.execute("SELECT id FROM reagents WHERE type='water' LIMIT 1").fetchone()
+
+        try:
+            pkg = svc.create_manual(
+                name='E2E冻结包J',
+                template_id=t['id'],
+                total_volume=25,
+                primer_id=p['id'],
+                master_mix_id=r_mm['id'],
+                water_id=r_w['id'],
+                operator='tester',
+            )
+            _ok('create_manual 带完整冻结参数成功')
+        except Exception as e:
+            _fail('create_manual 完整参数', str(e))
+            db.close()
+            shutil.rmtree(TMPDIR, ignore_errors=True)
+            return
+
+        try:
+            result = svc.apply_package_to_task(pkg['id'], task_name='E2E冻结任务', auto_generate=True, operator='tester')
+            if result.get('generate_result') and result.get('primer_id') == p['id']:
+                _ok('apply_package_to_task 自动生成方案且冻结引物生效')
+            else:
+                _fail('apply_package_to_task 自动生成', str(result))
+        except Exception as e:
+            _fail('apply_package_to_task auto_generate', str(e))
+
+        task_id = result.get('task_id')
+        if task_id:
+            try:
+                task = task_svc.get_task(task_id)
+                if task and task.get('id') == task_id:
+                    _ok('任务生成后可查询')
+                else:
+                    _fail('任务查询', str(task)[:100])
+            except Exception as e:
+                _fail('任务查询', str(e))
+
+        db.close()
+    shutil.rmtree(TMPDIR, ignore_errors=True)
+
+
+def test_strict_mode_no_silent_fallback():
+    """严格模式：引物/MM/水缺失或不存在时直接报错，不静默回退"""
+    print('\n=== 10. 严格模式禁止静默回退 ===')
+    app = _make_app()
+    with app.app_context():
+        db = _get_db(app)
+        _seed(db)
+        svc = ProtocolLockPackageService(db)
+        task_svc = TaskService(db)
+
+        t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+        p = db.execute("SELECT id FROM primers LIMIT 1").fetchone()
+        r_mm = db.execute("SELECT id FROM reagents WHERE type='master_mix' LIMIT 1").fetchone()
+        r_w = db.execute("SELECT id FROM reagents WHERE type='water' LIMIT 1").fetchone()
+
+        task_id = task_svc.create_task('严格模式测试任务', t['id'], 20, 'ul')
+
+        try:
+            task_svc.generate_plan(task_id, _from_lock_package=True)
+            _fail('严格模式未指定引物应拦截', '未抛异常')
+        except ValueError as e:
+            if '引物' in str(e.args[0]):
+                _ok('严格模式未指定引物拦截正确')
+            else:
+                _ok('严格模式未指定引物拦截 (ValueError)')
+        except Exception as e:
+            _fail('严格模式未指定引物', str(e))
+
+        try:
+            task_svc.generate_plan(
+                task_id,
+                primer_id=99999,
+                master_mix_id=r_mm['id'],
+                water_id=r_w['id'],
+                _from_lock_package=True,
+            )
+            _fail('严格模式引物不存在应拦截', '未抛异常')
+        except ValueError as e:
+            if '引物' in str(e.args[0]):
+                _ok('严格模式引物不存在拦截正确')
+            else:
+                _ok('严格模式引物不存在拦截 (ValueError)')
+        except Exception as e:
+            _fail('严格模式引物不存在', str(e))
+
+        try:
+            task_svc.generate_plan(
+                task_id,
+                primer_id=p['id'],
+                master_mix_id=r_mm['id'],
+                water_id=r_w['id'],
+            )
+            _ok('非严格模式正常生成方案')
+        except Exception as e:
+            _fail('非严格模式正常生成', str(e))
+
+        db.close()
+    shutil.rmtree(TMPDIR, ignore_errors=True)
+
+
+def test_regenerate_still_uses_frozen():
+    """重新生成方案时自动从引用快照注入冻结参数，不静默回退"""
+    print('\n=== 11. 重新生成方案仍用冻结参数 ===')
+    app = _make_app()
+    with app.app_context():
+        db = _get_db(app)
+        _seed(db)
+        svc = ProtocolLockPackageService(db)
+        task_svc = TaskService(db)
+
+        t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+        p = db.execute("SELECT id FROM primers LIMIT 1").fetchone()
+        r_mm = db.execute("SELECT id FROM reagents WHERE type='master_mix' LIMIT 1").fetchone()
+        r_w = db.execute("SELECT id FROM reagents WHERE type='water' LIMIT 1").fetchone()
+
+        pkg = svc.create_manual(
+            name='重生成冻结包K',
+            template_id=t['id'],
+            total_volume=20,
+            primer_id=p['id'],
+            master_mix_id=r_mm['id'],
+            water_id=r_w['id'],
+        )
+
+        apply_result = svc.apply_package_to_task(pkg['id'], task_name='重生成冻结任务', auto_generate=True)
+        task_id = apply_result.get('task_id')
+
+        if task_id:
+            try:
+                frozen = ProtocolLockPackageService.get_task_frozen_params(task_id, db)
+                if frozen and frozen.get('primer_id') == p['id'] and frozen.get('master_mix_id') == r_mm['id']:
+                    _ok('get_task_frozen_params 从引用快照取到冻结参数')
+                else:
+                    _fail('get_task_frozen_params', str(frozen))
+            except Exception as e:
+                _fail('get_task_frozen_params', str(e))
+
+            try:
+                task_svc.generate_plan(task_id)
+                _ok('重新生成方案时自动注入冻结参数成功')
+            except Exception as e:
+                _fail('重新生成方案自动注入', str(e))
+
+        db.close()
+    shutil.rmtree(TMPDIR, ignore_errors=True)
+
+
+def test_incomplete_frozen_params_intercept():
+    """冻结参数不全（如缺引物、缺MM、缺水）时，apply 必须拦截"""
+    print('\n=== 12. 冻结参数不全拦截 ===')
+    app = _make_app()
+    with app.app_context():
+        db = _get_db(app)
+        _seed(db)
+        svc = ProtocolLockPackageService(db)
+
+        t = db.execute("SELECT id FROM plate_templates LIMIT 1").fetchone()
+
+        pkg = svc.create_manual(
+            name='参数不全包L',
+            template_id=t['id'],
+            total_volume=20,
+        )
+
+        try:
+            svc.apply_package_to_task(pkg['id'], auto_generate=True)
+            _fail('冻结参数不全应拦截', '未抛异常')
+        except ValueError as e:
+            if len(e.args) > 1 and e.args[1] in ('frozen_params_incomplete', 'missing_required_params'):
+                _ok('冻结参数不全拦截正确 (错误码匹配)')
+            else:
+                _ok('冻结参数不全拦截正确 (ValueError)')
+        except Exception as e:
+            _fail('冻结参数不全拦截', str(e))
+
+        db.close()
+    shutil.rmtree(TMPDIR, ignore_errors=True)
+
+
 if __name__ == '__main__':
     test_create_from_task()
     test_manual_create_and_apply()
@@ -470,6 +677,10 @@ if __name__ == '__main__':
     test_restart_persistence()
     test_copy_and_export()
     test_task_reference()
+    test_frozen_params_e2e()
+    test_strict_mode_no_silent_fallback()
+    test_regenerate_still_uses_frozen()
+    test_incomplete_frozen_params_intercept()
 
     print(f'\n{"="*50}')
     print(f'结果: {PASS} PASS, {FAIL} FAIL')

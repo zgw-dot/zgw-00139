@@ -154,6 +154,40 @@ curl -X POST http://localhost:5000/api/tasks/import?conflict_mode=rename \
   -F "file=@task_plan.json"
 ```
 
+#### 步骤1.85：锁定包（Protocol Lock Package）
+
+锁定包将实验参数（模板、引物、Master Mix、水、体系体积、偏差备注）**冻结打包**，保证复跑实验时参数完全一致。**严格模式**：依赖缺失或停用时直接报错，**绝不静默回退**到默认试剂。
+
+| 操作 | 前端入口 | API | 说明 |
+|------|----------|-----|------|
+| **从任务建包** | 锁定包 Tab → +新建 → 选来源任务 | `POST /api/lock-packages` 带 `task_id` | 自动提取任务的引物/试剂冻结 |
+| **手动建包** | 锁定包 Tab → +新建 → 不选任务 | `POST /api/lock-packages` 带各参数 | 手动指定引物、Master Mix、水 |
+| **应用到任务** | 锁定包卡片 → ▶️ 应用建任务 | `POST /api/lock-packages/<id>/apply` | **自动生成方案**，参数缺失直接报错 |
+| **停用/启用** | 锁定包卡片 → ⏸ 停用 / ▶ 启用 | `POST /api/lock-packages/<id>/disable\|/enable` | 停用后禁止新建任务，历史任务不受影响 |
+| **复制** | 锁定包卡片 → 📋 复制 | `POST /api/lock-packages/<id>/copy` | 生成独立副本，可重命名 |
+| **导入导出** | 锁定包 Tab → 📥 导入 / 📄 导出 | `/api/lock-packages/export/json\|/csv` + `/import` | 支持重名冲突 reject/rename |
+
+**严格模式行为（关键差异）**：
+
+| 场景 | 普通任务 | 锁定包任务 / 从锁定包创建 |
+|------|----------|--------------------------|
+| 未指定引物 | 静默使用列表第一个 | ❌ 报错：未指定引物且关联锁定包 |
+| 引物 ID 不存在 | 静默回退默认 | ❌ 报错：锁定的引物不存在 |
+| Master Mix/水同理 | 静默回退 | ❌ 拦截 |
+| 锁定包已停用 | 无影响 | ❌ 无法应用到新任务 |
+
+```bash
+# 创建锁定包（从任务自动冻结）
+curl -X POST http://localhost:5000/api/lock-packages \
+  -H "Content-Type: application/json" \
+  -d '{"name": "2025Q2_Std_PCR", "task_id": 1, "operator": "user"}'
+
+# 应用锁定包（自动生成方案，参数不全直接报错）
+curl -X POST http://localhost:5000/api/lock-packages/1/apply \
+  -H "Content-Type: application/json" \
+  -d '{"task_name": "复跑_20250601", "auto_generate": true, "operator": "user"}'
+```
+
 #### 步骤1.9：编辑并重算预览（草稿 / 待复核）
 
 草稿或待复核的任务想换模板、挪孔位、调总体积、补删样本孔，无需删除重跑，使用"编辑并重算预览"链路：

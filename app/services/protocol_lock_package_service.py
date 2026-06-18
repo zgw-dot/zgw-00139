@@ -9,6 +9,54 @@ class ProtocolLockPackageService:
     def __init__(self, db):
         self.db = db
 
+    def _unpack_frozen_params(self, pkg):
+        """统一的冻结参数解析入口：以 frozen_params JSON 为准，回退到独立列。
+        返回标准化的 dict，字段: template_id, template_name, total_volume, volume_unit,
+        primer_id, primer_name, master_mix_id, master_mix_name, water_id, water_name, deviation_note
+        """
+        if not pkg:
+            return {}
+        frozen = pkg.get('frozen_params')
+        if isinstance(frozen, str):
+            try:
+                frozen = json.loads(frozen)
+            except (json.JSONDecodeError, TypeError):
+                frozen = {}
+        if not isinstance(frozen, dict):
+            frozen = {}
+        result = {
+            'template_id': frozen.get('template_id', pkg.get('template_id')),
+            'template_name': frozen.get('template_name', pkg.get('template_name')),
+            'total_volume': frozen.get('total_volume', pkg.get('total_volume')),
+            'volume_unit': frozen.get('volume_unit', pkg.get('volume_unit')) or 'ul',
+            'primer_id': frozen.get('primer_id', pkg.get('primer_id')),
+            'primer_name': frozen.get('primer_name', pkg.get('primer_name')),
+            'master_mix_id': frozen.get('master_mix_id', pkg.get('master_mix_id')),
+            'master_mix_name': frozen.get('master_mix_name', pkg.get('master_mix_name')),
+            'water_id': frozen.get('water_id', pkg.get('water_id')),
+            'water_name': frozen.get('water_name', pkg.get('water_name')),
+            'deviation_note': frozen.get('deviation_note', pkg.get('deviation_note')),
+        }
+        return result
+
+    def _build_frozen_params(self, template_id, template_name, total_volume, volume_unit,
+                             primer_id, primer_name, master_mix_id, master_mix_name,
+                             water_id, water_name, deviation_note):
+        """统一构造 frozen_params JSON。"""
+        return {
+            'template_id': template_id,
+            'template_name': template_name,
+            'total_volume': total_volume,
+            'volume_unit': volume_unit or 'ul',
+            'primer_id': primer_id,
+            'primer_name': primer_name,
+            'master_mix_id': master_mix_id,
+            'master_mix_name': master_mix_name,
+            'water_id': water_id,
+            'water_name': water_name,
+            'deviation_note': deviation_note,
+        }
+
     def _log_history(self, package_id, action, action_type, detail=None,
                      operator='system', snapshot=None):
         self.db.execute('''
@@ -165,19 +213,19 @@ class ProtocolLockPackageService:
                 water_id = ru['reagent_id']
                 water_name = ru['reagent_name']
 
-        frozen_params = {
-            'template_id': task['template_id'],
-            'template_name': template_name,
-            'total_volume': task['total_volume'],
-            'volume_unit': task['volume_unit'],
-            'primer_id': primer_id,
-            'primer_name': primer_name,
-            'master_mix_id': master_mix_id,
-            'master_mix_name': master_mix_name,
-            'water_id': water_id,
-            'water_name': water_name,
-            'deviation_note': task.get('deviation_note'),
-        }
+        frozen_params = self._build_frozen_params(
+            template_id=task['template_id'],
+            template_name=template_name,
+            total_volume=task['total_volume'],
+            volume_unit=task['volume_unit'],
+            primer_id=primer_id,
+            primer_name=primer_name,
+            master_mix_id=master_mix_id,
+            master_mix_name=master_mix_name,
+            water_id=water_id,
+            water_name=water_name,
+            deviation_note=task.get('deviation_note'),
+        )
 
         cursor = self.db.execute('''
             INSERT INTO protocol_lock_packages
@@ -270,19 +318,19 @@ class ProtocolLockPackageService:
             if r:
                 water_name = r['name']
 
-        frozen_params = {
-            'template_id': template_id,
-            'template_name': template_name,
-            'total_volume': total_volume,
-            'volume_unit': volume_unit or 'ul',
-            'primer_id': primer_id,
-            'primer_name': primer_name,
-            'master_mix_id': master_mix_id,
-            'master_mix_name': master_mix_name,
-            'water_id': water_id,
-            'water_name': water_name,
-            'deviation_note': deviation_note,
-        }
+        frozen_params = self._build_frozen_params(
+            template_id=template_id,
+            template_name=template_name,
+            total_volume=total_volume,
+            volume_unit=volume_unit,
+            primer_id=primer_id,
+            primer_name=primer_name,
+            master_mix_id=master_mix_id,
+            master_mix_name=master_mix_name,
+            water_id=water_id,
+            water_name=water_name,
+            deviation_note=deviation_note,
+        )
 
         cursor = self.db.execute('''
             INSERT INTO protocol_lock_packages
@@ -380,19 +428,19 @@ class ProtocolLockPackageService:
             r = self.db.execute('SELECT name FROM reagents WHERE id = ?', (new_water_id,)).fetchone()
             water_name = r['name'] if r else None
 
-        new_frozen_params = {
-            'template_id': new_template_id,
-            'template_name': template_name,
-            'total_volume': new_total_volume,
-            'volume_unit': new_volume_unit,
-            'primer_id': new_primer_id,
-            'primer_name': primer_name,
-            'master_mix_id': new_master_mix_id,
-            'master_mix_name': master_mix_name,
-            'water_id': new_water_id,
-            'water_name': water_name,
-            'deviation_note': new_deviation_note,
-        }
+        new_frozen_params = self._build_frozen_params(
+            template_id=new_template_id,
+            template_name=template_name,
+            total_volume=new_total_volume,
+            volume_unit=new_volume_unit,
+            primer_id=new_primer_id,
+            primer_name=primer_name,
+            master_mix_id=new_master_mix_id,
+            master_mix_name=master_mix_name,
+            water_id=new_water_id,
+            water_name=water_name,
+            deviation_note=new_deviation_note,
+        )
 
         self.db.execute('''
             UPDATE protocol_lock_packages SET
@@ -620,7 +668,8 @@ class ProtocolLockPackageService:
         )
         return updated
 
-    def apply_package_to_task(self, package_id, task_name=None, operator='system'):
+    def apply_package_to_task(self, package_id, task_name=None, operator='system',
+                               auto_generate=True):
         pkg = self._get_package(package_id)
         if not pkg:
             raise ValueError('锁定包不存在')
@@ -640,15 +689,17 @@ class ProtocolLockPackageService:
                 'dependency_missing'
             )
 
+        frozen = self._unpack_frozen_params(pkg)
+
         from app.services.task_service import TaskService
         task_service = TaskService(self.db)
 
         if not task_name:
             task_name = f'{pkg["name"]}_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
 
-        template_id = pkg['template_id']
-        total_volume = pkg['total_volume'] or 20
-        volume_unit = pkg['volume_unit'] or 'ul'
+        template_id = frozen['template_id']
+        total_volume = frozen['total_volume'] or 20
+        volume_unit = frozen['volume_unit'] or 'ul'
 
         task_id = task_service.create_task(
             name=task_name,
@@ -657,9 +708,9 @@ class ProtocolLockPackageService:
             volume_unit=volume_unit,
         )
 
-        if pkg.get('deviation_note'):
+        if frozen.get('deviation_note'):
             task_service.add_deviation_note(
-                task_id, pkg['deviation_note'], operator=operator,
+                task_id, frozen['deviation_note'], operator=operator,
             )
 
         pkg_snapshot = dict(pkg)
@@ -683,23 +734,86 @@ class ProtocolLockPackageService:
         ))
         self.db.commit()
 
+        generate_result = None
+        if auto_generate:
+            primer_id = frozen.get('primer_id')
+            master_mix_id = frozen.get('master_mix_id')
+            water_id = frozen.get('water_id')
+
+            if primer_id is None or master_mix_id is None or water_id is None:
+                missing_fields = []
+                if primer_id is None:
+                    missing_fields.append('引物(primer_id)')
+                if master_mix_id is None:
+                    missing_fields.append('Master Mix(master_mix_id)')
+                if water_id is None:
+                    missing_fields.append('水(water_id)')
+                raise ValueError(
+                    f'锁定包冻结参数不完整，缺少: {", ".join(missing_fields)}。'
+                    f'请先补全锁定包配置，或手动生成方案。',
+                    'frozen_params_incomplete'
+                )
+
+            try:
+                generate_result = task_service.generate_plan(
+                    task_id=task_id,
+                    primer_id=primer_id,
+                    master_mix_id=master_mix_id,
+                    water_id=water_id,
+                    _from_lock_package=True,
+                )
+            except ValueError as e:
+                raise ValueError(
+                    f'用锁定包冻结参数生成方案失败: {str(e)}',
+                    'generate_from_lock_failed'
+                )
+
         self._log_history(
             package_id, 'apply', 'package_applied',
-            detail=f'从锁定包 "{pkg["name"]}" 创建任务 #{task_id} "{task_name}"',
+            detail=f'从锁定包 "{pkg["name"]}" 创建任务 #{task_id} "{task_name}"'
+                   + (f'，自动生成方案成功' if auto_generate and generate_result else ''),
             operator=operator,
         )
 
-        return {
+        result = {
             'task_id': task_id,
             'package_id': package_id,
             'package_name': pkg['name'],
             'template_id': template_id,
             'total_volume': total_volume,
             'volume_unit': volume_unit,
-            'primer_id': pkg.get('primer_id'),
-            'master_mix_id': pkg.get('master_mix_id'),
-            'water_id': pkg.get('water_id'),
+            'primer_id': frozen.get('primer_id'),
+            'primer_name': frozen.get('primer_name'),
+            'master_mix_id': frozen.get('master_mix_id'),
+            'master_mix_name': frozen.get('master_mix_name'),
+            'water_id': frozen.get('water_id'),
+            'water_name': frozen.get('water_name'),
+            'deviation_note': frozen.get('deviation_note'),
         }
+        if generate_result:
+            result['generate_result'] = generate_result
+        return result
+
+    def get_task_frozen_params(self, task_id):
+        """查询任务关联的锁定包冻结参数（供 task_service 复跑/重算时使用）。
+        返回 None 表示没有关联锁定包；否则返回标准化的 frozen_params dict。
+        """
+        rows = self.db.execute(
+            'SELECT * FROM lock_package_task_references WHERE task_id = ? ORDER BY created_at DESC LIMIT 1',
+            (task_id,)
+        ).fetchall()
+        if not rows:
+            return None
+        ref = dict(rows[0])
+        snapshot = ref.get('package_snapshot')
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except (json.JSONDecodeError, TypeError):
+                snapshot = None
+        if not isinstance(snapshot, dict):
+            return None
+        return self._unpack_frozen_params(snapshot)
 
     def get_task_package_reference(self, task_id):
         rows = self.db.execute(

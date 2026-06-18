@@ -42,6 +42,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     loadExperimentPresets();
+    loadLockPackages();
 });
 
 function setupTabs() {
@@ -3009,6 +3010,361 @@ async function importPresetsFile(event) {
             const msg = `导入完成: 新增 ${data.imported}, 重命名 ${data.renamed}, 覆盖 ${data.overwritten}, 跳过 ${data.skipped}`;
             showToast(msg, 'success');
             loadExperimentPresets();
+            loadStats();
+        } else {
+            showToast('导入失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('导入失败: ' + e.message, 'error');
+    }
+}
+
+async function loadLockPackages() {
+    const isEnabled = document.getElementById('lock-pkg-enabled-filter').value;
+    const keyword = document.getElementById('lock-pkg-search').value;
+    let url = `${API_BASE}/lock-packages`;
+    const params = [];
+    if (isEnabled) params.push(`is_enabled=${isEnabled}`);
+    if (keyword) params.push(`keyword=${encodeURIComponent(keyword)}`);
+    if (params.length) url += '?' + params.join('&');
+
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        const listEl = document.getElementById('lock-package-list');
+
+        if (!data.packages || data.packages.length === 0) {
+            listEl.innerHTML = '<p class="empty">暂无锁定包</p>';
+            return;
+        }
+
+        listEl.innerHTML = data.packages.map(pkg => {
+            let frozen = pkg.frozen_params || {};
+            if (typeof frozen === 'string') {
+                try { frozen = JSON.parse(frozen); } catch(e) { frozen = {}; }
+            }
+            const depOk = pkg.dependency_check && pkg.dependency_check.valid;
+            const statusBadge = pkg.is_enabled
+                ? '<span style="color:#28a745;">● 启用</span>'
+                : '<span style="color:#dc3545;">● 停用</span>';
+            const depBadge = depOk
+                ? '<span style="color:#28a745;">✓ 依赖正常</span>'
+                : '<span style="color:#dc3545;">⚠ 依赖异常</span>';
+
+            let actionBtns = `
+                <button class="btn-small btn-primary" onclick="applyLockPackage(${pkg.id})" title="用锁定包新建任务并生成方案">▶️ 应用建任务</button>
+                <button class="btn-small" onclick="copyLockPackage(${pkg.id})" title="复制锁定包">📋 复制</button>
+            `;
+            if (pkg.is_enabled) {
+                actionBtns += `<button class="btn-small" onclick="disableLockPackage(${pkg.id})" title="停用锁定包">⏸ 停用</button>`;
+            } else {
+                actionBtns += `<button class="btn-small" onclick="enableLockPackage(${pkg.id})" title="启用锁定包">▶ 启用</button>`;
+            }
+            actionBtns += `<button class="btn-small" onclick="deleteLockPackage(${pkg.id})" title="删除锁定包">🗑️ 删除</button>`;
+
+            const pname = frozen.primer_name || pkg.primer_name || '-';
+            const mmname = frozen.master_mix_name || pkg.master_mix_name || '-';
+            const wname = frozen.water_name || pkg.water_name || '-';
+            const tname = frozen.template_name || pkg.template_name || '-';
+            const tvol = frozen.total_volume || pkg.total_volume || '-';
+            const tvunit = frozen.volume_unit || pkg.volume_unit || 'ul';
+            const srcName = pkg.source_task_name ? `来源任务: ${pkg.source_task_name}` : '手动创建';
+
+            return `
+            <div class="task-card status-${pkg.is_enabled ? 'approved' : 'rejected'}">
+                <div>
+                    <h3>${pkg.name}</h3>
+                    <div class="task-meta">
+                        <span>${statusBadge}</span>
+                        <span>${depBadge}</span>
+                        <span>模板: ${tname}</span>
+                        <span>体系: ${tvol} ${tvunit}</span>
+                    </div>
+                    ${pkg.description ? `<div style="margin-top:6px;font-size:12px;color:#666;">${pkg.description}</div>` : ''}
+                    <div style="margin-top:6px;font-size:12px;color:#555;">
+                        <span>🧪 引物: ${pname}</span>
+                        <span style="margin-left:12px;">💧 MM: ${mmname}</span>
+                        <span style="margin-left:12px;">💧 水: ${wname}</span>
+                    </div>
+                    <div style="margin-top:4px;font-size:11px;color:#999;">
+                        引用任务数: ${pkg.task_reference_count || 0} | ${srcName}
+                    </div>
+                </div>
+                <div class="task-card-actions">
+                    ${actionBtns}
+                </div>
+            </div>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error(e);
+        showToast('加载锁定包失败', 'error');
+    }
+}
+
+async function showCreateLockPackageModal() {
+    try {
+        const [tplResp, primerResp, reagResp, taskResp] = await Promise.all([
+            fetch(`${API_BASE}/templates`),
+            fetch(`${API_BASE}/primers`),
+            fetch(`${API_BASE}/reagents`),
+            fetch(`${API_BASE}/tasks`),
+        ]);
+        const templates = await tplResp.json();
+        const primers = await primerResp.json();
+        const reagents = await reagResp.json();
+        const tasks = await taskResp.json();
+
+        const masterMixes = reagents.filter(r => r.type === 'master_mix');
+        const waters = reagents.filter(r => r.type === 'water');
+
+        const modalBody = document.getElementById('modal-body');
+        modalBody.innerHTML = `
+            <h3>新建锁定包</h3>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px;">
+                <div>
+                    <label style="display:block;margin-bottom:4px;font-size:13px;">锁定包名称 *</label>
+                    <input type="text" id="lp-name" placeholder="例如: 2025Q2_Std_PCR" style="width:100%;padding:8px;">
+                </div>
+                <div>
+                    <label style="display:block;margin-bottom:4px;font-size:13px;">来源任务（可选，自动填入参数）</label>
+                    <select id="lp-source-task" style="width:100%;padding:8px;">
+                        <option value="">-- 不选，手动填写 --</option>
+                        ${tasks.map(t => `<option value="${t.id}">${t.name} (#${t.id})</option>`).join('')}
+                    </select>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <div>
+                        <label style="display:block;margin-bottom:4px;font-size:13px;">板位模板 *</label>
+                        <select id="lp-template" style="width:100%;padding:8px;">
+                            <option value="">请选择</option>
+                            ${templates.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;margin-bottom:4px;font-size:13px;">总体积 (µL) *</label>
+                        <input type="number" id="lp-volume" value="20" style="width:100%;padding:8px;">
+                    </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                    <div>
+                        <label style="display:block;margin-bottom:4px;font-size:13px;">引物</label>
+                        <select id="lp-primer" style="width:100%;padding:8px;">
+                            <option value="">请选择引物</option>
+                            ${primers.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;margin-bottom:4px;font-size:13px;">Master Mix</label>
+                        <select id="lp-mm" style="width:100%;padding:8px;">
+                            <option value="">请选择</option>
+                            ${masterMixes.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;margin-bottom:4px;font-size:13px;">水试剂</label>
+                        <select id="lp-water" style="width:100%;padding:8px;">
+                            <option value="">请选择</option>
+                            ${waters.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label style="display:block;margin-bottom:4px;font-size:13px;">描述</label>
+                    <textarea id="lp-desc" rows="2" style="width:100%;padding:8px;"></textarea>
+                </div>
+                <div style="margin-top:8px;">
+                    <button class="btn-primary" onclick="createLockPackage()" style="padding:10px 20px;">创建锁定包</button>
+                </div>
+            </div>
+        `;
+        document.getElementById('modal').classList.remove('hidden');
+    } catch (e) {
+        showToast('打开创建锁定包失败: ' + e.message, 'error');
+    }
+}
+
+async function createLockPackage() {
+    const name = document.getElementById('lp-name').value.trim();
+    const sourceTaskId = document.getElementById('lp-source-task').value;
+    if (!name) {
+        showToast('请输入锁定包名称', 'error');
+        return;
+    }
+    const payload = { name, operator: 'user' };
+    if (sourceTaskId) {
+        payload.task_id = parseInt(sourceTaskId);
+    } else {
+        const tpl = document.getElementById('lp-template').value;
+        const vol = parseFloat(document.getElementById('lp-volume').value);
+        const primer = document.getElementById('lp-primer').value;
+        const mm = document.getElementById('lp-mm').value;
+        const water = document.getElementById('lp-water').value;
+        const desc = document.getElementById('lp-desc').value.trim();
+        if (!tpl) { showToast('请选择模板', 'error'); return; }
+        payload.template_id = parseInt(tpl);
+        payload.total_volume = vol || 20;
+        if (primer) payload.primer_id = parseInt(primer);
+        if (mm) payload.master_mix_id = parseInt(mm);
+        if (water) payload.water_id = parseInt(water);
+        if (desc) payload.description = desc;
+    }
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('锁定包创建成功', 'success');
+            closeModal();
+            loadLockPackages();
+            loadStats();
+        } else {
+            showToast('创建失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'error');
+    }
+}
+
+async function applyLockPackage(pkgId) {
+    const taskName = prompt('请输入新任务名称（留空自动生成）:', '');
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/${pkgId}/apply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_name: taskName || undefined, operator: 'user', auto_generate: true }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const msg = data.generate_result
+                ? '任务创建并生成方案成功，已进入待复核状态'
+                : '任务创建成功（未生成方案）';
+            showToast(msg, 'success');
+            loadTasks();
+            loadLockPackages();
+            loadStats();
+            loadHistory();
+            if (data.task_id) {
+                setTimeout(() => showTaskDetail(data.task_id), 500);
+            }
+        } else {
+            showToast('应用失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('应用失败: ' + e.message, 'error');
+    }
+}
+
+async function copyLockPackage(pkgId) {
+    const newName = prompt('请输入新锁定包名称（留空自动加 _副本）:', '');
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/${pkgId}/copy`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName || undefined, operator: 'user' }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('锁定包复制成功', 'success');
+            loadLockPackages();
+            loadStats();
+        } else {
+            showToast('复制失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('复制失败: ' + e.message, 'error');
+    }
+}
+
+async function enableLockPackage(pkgId) {
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/${pkgId}/enable`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operator: 'user' }),
+        });
+        if (resp.ok) {
+            showToast('锁定包已启用', 'success');
+            loadLockPackages();
+        } else {
+            const d = await resp.json();
+            showToast('启用失败: ' + d.error, 'error');
+        }
+    } catch (e) {
+        showToast('启用失败: ' + e.message, 'error');
+    }
+}
+
+async function disableLockPackage(pkgId) {
+    if (!confirm('确定停用该锁定包？停用后无法用于新建任务，历史任务不受影响。')) return;
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/${pkgId}/disable`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operator: 'user' }),
+        });
+        if (resp.ok) {
+            showToast('锁定包已停用', 'success');
+            loadLockPackages();
+        } else {
+            const d = await resp.json();
+            showToast('停用失败: ' + d.error, 'error');
+        }
+    } catch (e) {
+        showToast('停用失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteLockPackage(pkgId) {
+    if (!confirm('确定删除该锁定包？\n\n注意：被任务引用的锁定包无法删除，建议先停用。')) return;
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/${pkgId}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('锁定包已删除', 'success');
+            loadLockPackages();
+            loadStats();
+        } else {
+            showToast('删除失败: ' + data.error, 'error');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+function exportLockPackagesJson() {
+    window.open(`${API_BASE}/lock-packages/export/json`);
+}
+
+function exportLockPackagesCsv() {
+    window.open(`${API_BASE}/lock-packages/export/csv`);
+}
+
+async function importLockPackagesFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    event.target.value = '';
+    const conflictMode = confirm(
+        '导入同名锁定包冲突时如何处理？\n\n' +
+        '确定 = reject（拒绝，保留原有）\n' +
+        '取消 = rename（自动重命名导入）'
+    ) ? 'reject' : 'rename';
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('conflict_mode', conflictMode);
+    try {
+        const resp = await fetch(`${API_BASE}/lock-packages/import`, {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const msg = `导入完成: 新增 ${data.imported}, 重命名 ${data.renamed}, 覆盖 ${data.overwritten}, 跳过 ${data.skipped}`;
+            showToast(msg, 'success');
+            loadLockPackages();
             loadStats();
         } else {
             showToast('导入失败: ' + data.error, 'error');

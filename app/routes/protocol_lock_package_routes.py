@@ -207,10 +207,12 @@ def apply_package(package_id):
 
     data = request.get_json() or {}
     try:
+        auto_generate = data.get('auto_generate', True)
         result = service.apply_package_to_task(
             package_id,
             task_name=data.get('task_name'),
             operator=data.get('operator', 'user'),
+            auto_generate=auto_generate,
         )
         return jsonify(result), 201
     except ValueError as e:
@@ -224,6 +226,12 @@ def apply_package(package_id):
             dep_result = service.validate_dependencies(package_id)
             resp['missing'] = dep_result.get('missing', [])
             resp['disabled'] = dep_result.get('disabled', [])
+            return jsonify(resp), 422
+        if len(e.args) > 1 and e.args[1] == 'frozen_params_incomplete':
+            resp['reason'] = 'frozen_params_incomplete'
+            return jsonify(resp), 422
+        if len(e.args) > 1 and e.args[1] == 'generate_from_lock_failed':
+            resp['reason'] = 'generate_from_lock_failed'
             return jsonify(resp), 422
         return jsonify(resp), 400
     except Exception as e:
@@ -266,6 +274,21 @@ def get_task_package_ref(task_id):
     try:
         refs = service.get_task_package_reference(task_id)
         return jsonify({'references': refs, 'count': len(refs)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@lock_package_bp.route('/task/<int:task_id>/frozen-params', methods=['GET'])
+def get_task_frozen_params(task_id):
+    from app.database import get_db
+    db = get_db(current_app)
+    service = _get_service(db)
+
+    try:
+        frozen = service.get_task_frozen_params(task_id)
+        if frozen is None:
+            return jsonify({'has_lock_package': False, 'frozen_params': None})
+        return jsonify({'has_lock_package': True, 'frozen_params': frozen})
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
