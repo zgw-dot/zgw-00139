@@ -68,8 +68,10 @@ def init_db(app):
             volume_unit TEXT NOT NULL,
             expiry_date TEXT,
             is_frozen INTEGER NOT NULL DEFAULT 0,
+            freeze_reason TEXT,
             min_usable_volume REAL,
             min_usable_unit TEXT,
+            source_file TEXT,
             description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (reagent_id) REFERENCES reagents(id) ON DELETE CASCADE,
@@ -247,6 +249,61 @@ def init_db(app):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS batch_import_conflicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reagent_name TEXT NOT NULL,
+            batch_number TEXT NOT NULL,
+            source_file TEXT,
+            conflict_type TEXT NOT NULL DEFAULT 'duplicate_batch',
+            incoming_volume REAL,
+            incoming_volume_unit TEXT,
+            incoming_expiry_date TEXT,
+            incoming_is_frozen INTEGER,
+            existing_batch_id INTEGER,
+            existing_volume REAL,
+            existing_volume_unit TEXT,
+            existing_expiry_date TEXT,
+            existing_is_frozen INTEGER,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            resolution_note TEXT,
+            detail TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (existing_batch_id) REFERENCES reagent_batches(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS batch_trace_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            batch_number TEXT NOT NULL,
+            reagent_id INTEGER NOT NULL,
+            reagent_name TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_subtype TEXT,
+            task_id INTEGER,
+            task_name TEXT,
+            task_status TEXT,
+            volume_change REAL DEFAULT 0,
+            volume_unit TEXT,
+            balance_volume REAL,
+            balance_unit TEXT,
+            source_file TEXT,
+            freeze_reason TEXT,
+            operator TEXT DEFAULT 'system',
+            detail TEXT,
+            raw_data TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES reagent_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY (reagent_id) REFERENCES reagents(id),
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ledger_batch ON batch_trace_ledger(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_ledger_task ON batch_trace_ledger(task_id);
+        CREATE INDEX IF NOT EXISTS idx_ledger_reagent ON batch_trace_ledger(reagent_id);
+        CREATE INDEX IF NOT EXISTS idx_ledger_event ON batch_trace_ledger(event_type);
+        CREATE INDEX IF NOT EXISTS idx_ledger_created ON batch_trace_ledger(created_at);
+        CREATE INDEX IF NOT EXISTS idx_conflicts_batch ON batch_import_conflicts(reagent_name, batch_number);
     ''')
     
     # schema 迁移：补齐旧库缺少的列
@@ -268,7 +325,14 @@ def init_db(app):
         conn.execute("ALTER TABLE reagent_inventory_log ADD COLUMN batch_id INTEGER")
     if 'batch_number' not in existing_cols:
         conn.execute("ALTER TABLE reagent_inventory_log ADD COLUMN batch_number TEXT")
-    
+
+    cur = conn.execute("PRAGMA table_info(reagent_batches)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if 'freeze_reason' not in existing_cols:
+        conn.execute("ALTER TABLE reagent_batches ADD COLUMN freeze_reason TEXT")
+    if 'source_file' not in existing_cols:
+        conn.execute("ALTER TABLE reagent_batches ADD COLUMN source_file TEXT")
+
     conn.commit()
     conn.close()
     

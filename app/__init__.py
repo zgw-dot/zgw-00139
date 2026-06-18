@@ -22,11 +22,12 @@ def create_app():
     from app.routes.task_routes import task_bp
     from app.routes.history_routes import history_bp
     from app.routes.report_routes import report_bp
-    
+    from app.routes.batch_trace_routes import batch_trace_bp
+
     @app.route('/data/<path:filename>')
     def serve_data_file(filename):
         return send_from_directory(app.config['DATA_DIR'], filename)
-    
+
     app.register_blueprint(main_bp)
     app.register_blueprint(sample_bp, url_prefix='/api/samples')
     app.register_blueprint(primer_bp, url_prefix='/api/primers')
@@ -35,5 +36,6 @@ def create_app():
     app.register_blueprint(task_bp, url_prefix='/api/tasks')
     app.register_blueprint(history_bp, url_prefix='/api/history')
     app.register_blueprint(report_bp, url_prefix='/api/reports')
+    app.register_blueprint(batch_trace_bp, url_prefix='/api/batch-trace')
     
     return app

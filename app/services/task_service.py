@@ -12,6 +12,8 @@ class TaskService:
         self.db = db
         self.engine = LiquidHandlingEngine()
         self.batch_service = BatchService(db)
+        from app.services.batch_trace_service import BatchTraceService
+        self._trace_service = BatchTraceService(db)
     
     def create_task(self, name, template_id, total_volume, volume_unit='ul'):
         if not UnitConverter.is_volume_unit(volume_unit):
@@ -304,6 +306,16 @@ class TaskService:
                     'expiry_date': alloc.get('expiry_date'),
                     'source': usage['source'],
                 })
+                if alloc.get('batch_id'):
+                    try:
+                        self._trace_service.log_allocate(
+                            batch_id=alloc['batch_id'],
+                            task_id=task_id,
+                            allocated_volume_ul=alloc['allocated_volume_ul'],
+                            source='plan',
+                        )
+                    except Exception:
+                        pass
         
         self.db.execute('''
             INSERT INTO task_primer_usage (task_id, primer_id, primer_name, used_volume, used_volume_unit, source)
@@ -457,6 +469,15 @@ class TaskService:
                 batch_deduct_details.append(
                     f'{reagent["name"]}-{usage.get("batch_number", "")}: -{used_vol_ul:.1f}ul (余 {new_vol_ul:.1f}ul)'
                 )
+                try:
+                    self._trace_service.log_deduct(
+                        batch_id=usage['batch_id'],
+                        task_id=task_id,
+                        deducted_volume_ul=used_vol_ul,
+                        operator=operator,
+                    )
+                except Exception:
+                    pass
             else:
                 current_vol_ul = UnitConverter.convert_volume(
                     reagent['volume'], reagent['volume_unit'], 'ul'
@@ -607,6 +628,16 @@ class TaskService:
                 batch_refund_details.append(
                     f'{reagent["name"]}-{usage.get("batch_number", "")}: +{used_vol_ul:.1f}ul (现 {new_vol_ul:.1f}ul)'
                 )
+                try:
+                    self._trace_service.log_refund(
+                        batch_id=usage['batch_id'],
+                        task_id=task_id,
+                        refund_volume_ul=used_vol_ul,
+                        force=force,
+                        operator=operator,
+                    )
+                except Exception:
+                    pass
             else:
                 current_vol_ul = UnitConverter.convert_volume(
                     reagent['volume'], reagent['volume_unit'], 'ul'
@@ -1120,6 +1151,23 @@ class TaskService:
                  datetime.now().isoformat(), task_id)
             )
 
+            old_usages = [dict(u) for u in self.db.execute(
+                'SELECT * FROM task_reagent_usage WHERE task_id = ? AND batch_id IS NOT NULL',
+                (task_id,)
+            ).fetchall()]
+            for u in old_usages:
+                try:
+                    cleared_ul = UnitConverter.convert_volume(
+                        u['used_volume'], u['used_volume_unit'], 'ul'
+                    )
+                    self._trace_service.log_edit_clear(
+                        batch_id=u['batch_id'],
+                        task_id=task_id,
+                        cleared_volume_ul=cleared_ul,
+                    )
+                except Exception:
+                    pass
+
             self.db.execute('DELETE FROM task_wells WHERE task_id = ?', (task_id,))
             self.db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
             self.db.execute('DELETE FROM task_primer_usage WHERE task_id = ?', (task_id,))
@@ -1311,6 +1359,16 @@ class TaskService:
                         alloc['allocated_volume_ul'], 'ul',
                         usage['source']
                     ))
+                    if alloc.get('batch_id'):
+                        try:
+                            self._trace_service.log_allocate(
+                                batch_id=alloc['batch_id'],
+                                task_id=new_task_id,
+                                allocated_volume_ul=alloc['allocated_volume_ul'],
+                                source='copy',
+                            )
+                        except Exception:
+                            pass
         
         primer_usage = self.db.execute(
             'SELECT * FROM task_primer_usage WHERE task_id = ?',
@@ -1559,6 +1617,16 @@ class TaskService:
                             alloc['allocated_volume_ul'], 'ul',
                             summary['source']
                         ))
+                        if alloc.get('batch_id'):
+                            try:
+                                self._trace_service.log_allocate(
+                                    batch_id=alloc['batch_id'],
+                                    task_id=new_task_id,
+                                    allocated_volume_ul=alloc['allocated_volume_ul'],
+                                    source='import',
+                                )
+                            except Exception:
+                                pass
 
             if primer_usage:
                 for usage in primer_usage:

@@ -82,23 +82,28 @@ def create_reagent():
 @reagent_bp.route('/import', methods=['POST'])
 def import_reagents():
     from app.database import get_db
+    from app.services.batch_trace_service import BatchTraceService
     db = get_db(current_app)
-    
+    trace_service = BatchTraceService(db)
+
     if 'file' not in request.files:
         return jsonify({'error': '未上传文件'}), 400
-    
+
     file = request.files['file']
+    source_filename = file.filename or 'unknown.csv'
     content = file.read().decode('utf-8')
-    
+
     try:
         parsed_rows = DataImporter.parse_reagents_csv(content)
     except Exception as e:
         return jsonify({'error': f'CSV 解析失败: {str(e)}'}), 400
-    
+
     imported_reagents = 0
     imported_batches = 0
     errors = []
-    
+    conflict_ids = []
+    imported_batch_ids = []
+
     reagent_name_to_id = {}
     for row in parsed_rows:
         reagent = row['reagent']
@@ -107,7 +112,7 @@ def import_reagents():
             existing = db.execute(
                 'SELECT id FROM reagents WHERE name = ?', (reagent['name'],)
             ).fetchone()
-            
+
             if existing:
                 reagent_id = existing['id']
             else:
@@ -129,20 +134,51 @@ def import_reagents():
                 reagent_id = cursor.lastrowid
                 imported_reagents += 1
                 reagent_name_to_id[reagent['name']] = reagent_id
-            
+
             if batch.get('batch_number'):
                 existing_batch = db.execute(
-                    'SELECT id FROM reagent_batches WHERE reagent_id = ? AND batch_number = ?',
+                    'SELECT * FROM reagent_batches WHERE reagent_id = ? AND batch_number = ?',
                     (reagent_id, batch['batch_number'])
                 ).fetchone()
                 if existing_batch:
-                    errors.append(f"试剂 {reagent['name']} 的批次 {batch['batch_number']} 已存在，跳过该批次")
+                    err_msg = (
+                        f"试剂 {reagent['name']} 的批次 {batch['batch_number']} 已存在，"
+                        f"冲突留痕已记录，可在批次追溯台账中查询"
+                    )
+                    errors.append(err_msg)
+                    try:
+                        conflict_id = trace_service.record_conflict(
+                            reagent_name=reagent['name'],
+                            batch_number=batch['batch_number'],
+                            conflict_type='duplicate_batch',
+                            source_file=source_filename,
+                            incoming={
+                                'volume': reagent['volume'],
+                                'volume_unit': reagent['volume_unit'],
+                                'expiry_date': batch.get('expiry_date'),
+                                'is_frozen': batch.get('is_frozen'),
+                            },
+                            existing={
+                                'batch_id': existing_batch['id'],
+                                'volume': existing_batch['volume'],
+                                'volume_unit': existing_batch['volume_unit'],
+                                'expiry_date': existing_batch['expiry_date'] if 'expiry_date' in existing_batch.keys() else None,
+                                'is_frozen': existing_batch['is_frozen'] if 'is_frozen' in existing_batch.keys() else 0,
+                            },
+                            detail=(
+                                f"导入文件 {source_filename} 时发现同名批次冲突: "
+                                f"试剂={reagent['name']}, 批次号={batch['batch_number']}"
+                            ),
+                        )
+                        conflict_ids.append(conflict_id)
+                    except Exception as ce:
+                        errors.append(f"记录冲突留痕失败: {str(ce)}")
                 else:
-                    db.execute('''
+                    cursor = db.execute('''
                         INSERT INTO reagent_batches 
                         (reagent_id, batch_number, volume, volume_unit, expiry_date, 
-                         is_frozen, min_usable_volume, min_usable_unit, description)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         is_frozen, min_usable_volume, min_usable_unit, source_file, description)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         reagent_id,
                         batch['batch_number'],
@@ -152,20 +188,38 @@ def import_reagents():
                         1 if batch.get('is_frozen') else 0,
                         batch.get('min_usable_volume'),
                         batch.get('min_usable_unit', 'ul'),
+                        source_filename,
                         reagent.get('description', '')
                     ))
+                    batch_id = cursor.lastrowid
                     imported_batches += 1
-            
+                    imported_batch_ids.append(batch_id)
+                    try:
+                        trace_service.log_import(
+                            batch_id=batch_id,
+                            source_file=source_filename,
+                            import_note=(
+                                f"从文件 {source_filename} 导入批次 {batch['batch_number']}，"
+                                f"所属试剂: {reagent['name']}"
+                            ),
+                        )
+                    except Exception as ie:
+                        errors.append(f"批次 {batch['batch_number']} 登记台账失败: {str(ie)}")
+
         except Exception as e:
             errors.append(f"试剂 {reagent['name']}: {str(e)}")
-    
+
     db.commit()
-    
+
     return jsonify({
         'imported_reagents': imported_reagents,
         'imported_batches': imported_batches,
         'errors': errors,
-        'total': len(parsed_rows)
+        'total': len(parsed_rows),
+        'source_file': source_filename,
+        'conflict_recorded_count': len(conflict_ids),
+        'conflict_ids': conflict_ids,
+        'imported_batch_ids': imported_batch_ids,
     })
 
 @reagent_bp.route('/<int:reagent_id>', methods=['PUT'])
@@ -248,39 +302,45 @@ def list_reagent_batches(reagent_id):
 @reagent_bp.route('/<int:reagent_id>/batches', methods=['POST'])
 def create_reagent_batch(reagent_id):
     from app.database import get_db
+    from app.services.batch_trace_service import BatchTraceService
     db = get_db(current_app)
-    
+    trace_service = BatchTraceService(db)
+
     reagent = db.execute('SELECT id FROM reagents WHERE id = ?', (reagent_id,)).fetchone()
     if not reagent:
         return jsonify({'error': '试剂不存在'}), 404
-    
+
     data = request.get_json() or {}
-    
+
     try:
         batch_number = (data.get('batch_number') or '').strip()
         if not batch_number:
             raise ValueError('批次号不能为空')
-        
+
         volume_unit = data.get('volume_unit', 'ul')
         if not UnitConverter.is_volume_unit(volume_unit):
             raise ValueError(f'无效的体积单位: {volume_unit}')
-        
+
         min_usable_unit = data.get('min_usable_unit', 'ul')
         if not UnitConverter.is_volume_unit(min_usable_unit):
             raise ValueError(f'无效的最小可用量单位: {min_usable_unit}')
-        
+
         existing = db.execute(
-            'SELECT id FROM reagent_batches WHERE reagent_id = ? AND batch_number = ?',
+            'SELECT * FROM reagent_batches WHERE reagent_id = ? AND batch_number = ?',
             (reagent_id, batch_number)
         ).fetchone()
         if existing:
-            raise ValueError(f'同名批次已存在: {batch_number}')
-        
+            return jsonify({
+                'error': f'同名批次已存在: {batch_number}，可在批次追溯台账查询冲突记录',
+                'conflict_type': 'duplicate_batch',
+                'existing_batch_id': existing['id'],
+            }), 409
+
         cursor = db.execute('''
             INSERT INTO reagent_batches 
             (reagent_id, batch_number, volume, volume_unit, expiry_date, 
-             is_frozen, min_usable_volume, min_usable_unit, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             is_frozen, freeze_reason, min_usable_volume, min_usable_unit, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             reagent_id,
             batch_number,
@@ -288,13 +348,24 @@ def create_reagent_batch(reagent_id):
             volume_unit,
             data.get('expiry_date'),
             1 if data.get('is_frozen') else 0,
+            data.get('freeze_reason'),
             data.get('min_usable_volume'),
             min_usable_unit,
             data.get('description', '')
         ))
+        batch_id = cursor.lastrowid
         db.commit()
-        
-        batch = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (cursor.lastrowid,)).fetchone()
+
+        try:
+            trace_service.log_manual_create(
+                batch_id=batch_id,
+                operator=data.get('operator', 'user'),
+                note=data.get('note') or f'手工新增批次 {batch_number}',
+            )
+        except Exception as _:
+            pass
+
+        batch = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
         return jsonify(dict(batch)), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 400
@@ -314,23 +385,25 @@ def get_reagent_batch(batch_id):
 @reagent_bp.route('/batches/<int:batch_id>', methods=['PUT'])
 def update_reagent_batch(batch_id):
     from app.database import get_db
+    from app.services.batch_trace_service import BatchTraceService
     db = get_db(current_app)
-    
+    trace_service = BatchTraceService(db)
+
     batch = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
     if not batch:
         return jsonify({'error': '批次不存在'}), 404
-    
+
     data = request.get_json() or {}
-    
+
     try:
         volume_unit = data.get('volume_unit', batch['volume_unit'])
         if not UnitConverter.is_volume_unit(volume_unit):
             raise ValueError(f'无效的体积单位: {volume_unit}')
-        
+
         min_usable_unit = data.get('min_usable_unit', batch['min_usable_unit'])
         if min_usable_unit and not UnitConverter.is_volume_unit(min_usable_unit):
             raise ValueError(f'无效的最小可用量单位: {min_usable_unit}')
-        
+
         new_batch_number = (data.get('batch_number') or batch['batch_number']).strip()
         if new_batch_number != batch['batch_number']:
             existing = db.execute(
@@ -338,12 +411,31 @@ def update_reagent_batch(batch_id):
                 (batch['reagent_id'], new_batch_number, batch_id)
             ).fetchone()
             if existing:
-                raise ValueError(f'同名批次已存在: {new_batch_number}')
-        
+                return jsonify({
+                    'error': f'同名批次已存在: {new_batch_number}',
+                    'conflict_type': 'duplicate_batch',
+                    'existing_batch_id': existing['id'],
+                }), 409
+
+        changes = {}
+        fields_map = {
+            'batch_number': ('batch_number', new_batch_number, batch['batch_number']),
+            'volume': ('volume', float(data.get('volume', batch['volume'])), batch['volume']),
+            'volume_unit': ('volume_unit', volume_unit, batch['volume_unit']),
+            'expiry_date': ('expiry_date', data.get('expiry_date', batch['expiry_date']), batch['expiry_date']),
+            'is_frozen': ('is_frozen', 1 if data.get('is_frozen') else 0, batch['is_frozen']),
+            'freeze_reason': ('freeze_reason', data.get('freeze_reason'), batch.get('freeze_reason')),
+            'min_usable_volume': ('min_usable_volume', data.get('min_usable_volume', batch['min_usable_volume']), batch['min_usable_volume']),
+            'min_usable_unit': ('min_usable_unit', min_usable_unit, batch['min_usable_unit']),
+        }
+        for key, (_, new_val, old_val) in fields_map.items():
+            if new_val != old_val:
+                changes[key] = {'old': old_val, 'new': new_val}
+
         db.execute('''
             UPDATE reagent_batches SET 
                 batch_number = ?, volume = ?, volume_unit = ?, expiry_date = ?,
-                is_frozen = ?, min_usable_volume = ?, min_usable_unit = ?, description = ?
+                is_frozen = ?, freeze_reason = ?, min_usable_volume = ?, min_usable_unit = ?, description = ?
             WHERE id = ?
         ''', (
             new_batch_number,
@@ -351,13 +443,25 @@ def update_reagent_batch(batch_id):
             volume_unit,
             data.get('expiry_date', batch['expiry_date']),
             1 if data.get('is_frozen') else 0,
+            data.get('freeze_reason'),
             data.get('min_usable_volume', batch['min_usable_volume']),
             min_usable_unit,
             data.get('description', batch.get('description', '')),
             batch_id
         ))
         db.commit()
-        
+
+        try:
+            if changes:
+                trace_service.log_manual_update(
+                    batch_id=batch_id,
+                    changes=changes,
+                    operator=data.get('operator', 'user'),
+                    note=data.get('note'),
+                )
+        except Exception as _:
+            pass
+
         updated = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
         return jsonify(dict(updated))
     except Exception as e:
@@ -367,15 +471,29 @@ def update_reagent_batch(batch_id):
 @reagent_bp.route('/batches/<int:batch_id>/freeze', methods=['POST'])
 def freeze_batch(batch_id):
     from app.database import get_db
+    from app.services.batch_trace_service import BatchTraceService
     db = get_db(current_app)
-    
+    trace_service = BatchTraceService(db)
+
     batch = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
     if not batch:
         return jsonify({'error': '批次不存在'}), 404
-    
+
+    data = request.get_json() or {}
+    reason = data.get('reason') or data.get('freeze_reason')
+
     db.execute('UPDATE reagent_batches SET is_frozen = 1 WHERE id = ?', (batch_id,))
     db.commit()
-    
+
+    try:
+        trace_service.log_freeze(
+            batch_id=batch_id,
+            reason=reason,
+            operator=data.get('operator', 'user'),
+        )
+    except Exception as _:
+        pass
+
     updated = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
     return jsonify(dict(updated))
 
@@ -383,15 +501,28 @@ def freeze_batch(batch_id):
 @reagent_bp.route('/batches/<int:batch_id>/unfreeze', methods=['POST'])
 def unfreeze_batch(batch_id):
     from app.database import get_db
+    from app.services.batch_trace_service import BatchTraceService
     db = get_db(current_app)
-    
+    trace_service = BatchTraceService(db)
+
     batch = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
     if not batch:
         return jsonify({'error': '批次不存在'}), 404
-    
+
+    data = request.get_json() or {}
+
     db.execute('UPDATE reagent_batches SET is_frozen = 0 WHERE id = ?', (batch_id,))
     db.commit()
-    
+
+    try:
+        trace_service.log_unfreeze(
+            batch_id=batch_id,
+            operator=data.get('operator', 'user'),
+            note=data.get('note'),
+        )
+    except Exception as _:
+        pass
+
     updated = db.execute('SELECT * FROM reagent_batches WHERE id = ?', (batch_id,)).fetchone()
     return jsonify(dict(updated))
 

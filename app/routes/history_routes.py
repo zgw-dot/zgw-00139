@@ -15,15 +15,21 @@ def _get_filter_args():
     }
 
 
+def _get_batch_number():
+    return (request.args.get('batch_number') or '').strip() or None
+
+
 @history_bp.route('', methods=['GET'])
 def list_history():
     from app.database import get_db
     from app.services.history_service import HistoryService
+    from app.services.batch_trace_service import BatchTraceService
 
     db = get_db(current_app)
     service = HistoryService(db, current_app.config['DATA_DIR'])
 
     filters = _get_filter_args()
+    batch_number = _get_batch_number()
     result = service.query_history(**filters)
 
     if result.get('errors'):
@@ -35,9 +41,20 @@ def list_history():
             'warnings': result.get('warnings', []),
         }), 400
 
+    records = result['records']
+    total = result['total']
+    if batch_number:
+        trace_service = BatchTraceService(db)
+        records = trace_service.enrich_history_with_batch_filter(
+            records, batch_number=batch_number
+        )
+        total = len(records)
+        extra = f' | 批次号:{batch_number}'
+        result['filters'] = (result.get('filters', '') + extra).strip()
+
     return jsonify({
-        'records': result['records'],
-        'total': result['total'],
+        'records': records,
+        'total': total,
         'filters': result['filters'],
         'errors': [],
         'warnings': result.get('warnings', []),
