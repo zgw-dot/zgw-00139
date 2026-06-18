@@ -33,7 +33,10 @@ document.addEventListener('DOMContentLoaded', function() {
     loadReagents();
     loadTemplates();
     loadTasks();
-    loadHistory();
+    loadHistoryFilterOptions().then(() => {
+        restoreHistoryFiltersFromStorage();
+        loadHistory();
+    });
 });
 
 function setupTabs() {
@@ -1282,18 +1285,177 @@ function downloadReportJson() {
     closeModal();
 }
 
+const HISTORY_FILTER_STORAGE_KEY = 'pcr_planner_history_filters_v1';
+
+async function loadHistoryFilterOptions() {
+    try {
+        const resp = await fetch(`${API_BASE}/history/filters`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const taskSel = document.getElementById('history-filter-task');
+        if (taskSel && data.tasks && data.tasks.length) {
+            const curVal = taskSel.value;
+            taskSel.innerHTML = '<option value="">全部任务</option>' +
+                data.tasks.map(t => `<option value="${t.id}">#${t.id} - ${t.name} (${t.status})</option>`).join('');
+            taskSel.value = curVal;
+        }
+
+        const actSel = document.getElementById('history-filter-action');
+        if (actSel && data.action_types && data.action_types.length) {
+            const curVal = actSel.value;
+            actSel.innerHTML = '<option value="">全部类型</option>' +
+                data.action_types.map(a => `<option value="${a.value}">${a.label}</option>`).join('');
+            actSel.value = curVal;
+        }
+    } catch (e) {
+        console.warn('加载历史筛选选项失败', e);
+    }
+}
+
+function getHistoryFilters() {
+    return {
+        task_id: document.getElementById('history-filter-task').value || undefined,
+        action_type: document.getElementById('history-filter-action').value || undefined,
+        start_date: document.getElementById('history-filter-start').value || undefined,
+        end_date: document.getElementById('history-filter-end').value || undefined,
+        keyword: document.getElementById('history-filter-keyword').value.trim() || undefined,
+        limit: parseInt(document.getElementById('history-filter-limit').value) || 100,
+    };
+}
+
+function setHistoryFilters(filters) {
+    if (!filters) return;
+    if (filters.task_id !== undefined) document.getElementById('history-filter-task').value = filters.task_id || '';
+    if (filters.action_type !== undefined) document.getElementById('history-filter-action').value = filters.action_type || '';
+    if (filters.start_date !== undefined) document.getElementById('history-filter-start').value = filters.start_date || '';
+    if (filters.end_date !== undefined) document.getElementById('history-filter-end').value = filters.end_date || '';
+    if (filters.keyword !== undefined) document.getElementById('history-filter-keyword').value = filters.keyword || '';
+    if (filters.limit !== undefined) document.getElementById('history-filter-limit').value = filters.limit || '50';
+}
+
+function saveHistoryFiltersToStorage() {
+    try {
+        const f = getHistoryFilters();
+        localStorage.setItem(HISTORY_FILTER_STORAGE_KEY, JSON.stringify(f));
+    } catch (e) {
+        console.warn('保存筛选条件失败', e);
+    }
+}
+
+function restoreHistoryFiltersFromStorage() {
+    try {
+        const raw = localStorage.getItem(HISTORY_FILTER_STORAGE_KEY);
+        if (!raw) return;
+        const f = JSON.parse(raw);
+        setHistoryFilters(f);
+    } catch (e) {
+        console.warn('恢复筛选条件失败', e);
+    }
+}
+
+function buildHistoryQueryString(filters) {
+    const params = new URLSearchParams();
+    Object.entries(filters || {}).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') {
+            params.append(k, String(v));
+        }
+    });
+    return params.toString();
+}
+
+function renderHistoryErrors(errors) {
+    const el = document.getElementById('history-errors');
+    if (!errors || !errors.length) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+    }
+    el.textContent = '❌ ' + errors.join('\n');
+    el.classList.remove('hidden');
+}
+
+function renderHistoryWarnings(warnings) {
+    const el = document.getElementById('history-warnings');
+    if (!warnings || !warnings.length) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+    }
+    el.textContent = '⚠️ ' + warnings.join('\n');
+    el.classList.remove('hidden');
+}
+
+function renderHistoryFilterSummary(summary) {
+    const el = document.getElementById('history-filter-summary');
+    if (!summary) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+    }
+    el.textContent = '🔍 当前筛选：' + summary;
+    el.classList.remove('hidden');
+}
+
+function applyHistoryFilters() {
+    saveHistoryFiltersToStorage();
+    loadHistory();
+}
+
+function resetHistoryFilters() {
+    setHistoryFilters({
+        task_id: '',
+        action_type: '',
+        start_date: '',
+        end_date: '',
+        keyword: '',
+        limit: '50',
+    });
+    try { localStorage.removeItem(HISTORY_FILTER_STORAGE_KEY); } catch (e) {}
+    loadHistory();
+    showToast('筛选条件已重置', 'success');
+}
+
 async function loadHistory() {
     try {
-        const response = await fetch(`${API_BASE}/history?limit=50`);
+        const filters = getHistoryFilters();
+        const qs = buildHistoryQueryString(filters);
+        const url = `${API_BASE}/history${qs ? '?' + qs : ''}`;
+        const response = await fetch(url);
         const data = await response.json();
-        
         const listEl = document.getElementById('history-list');
-        
-        if (data.length === 0) {
-            listEl.innerHTML = '<p class="empty">暂无历史记录</p>';
+
+        renderHistoryErrors(data.errors || []);
+        renderHistoryWarnings(data.warnings || []);
+        renderHistoryFilterSummary(data.filters || '');
+
+        const countEl = document.getElementById('history-count-info');
+        const records = data.records || [];
+        const total = typeof data.total === 'number' ? data.total : records.length;
+        if (countEl) {
+            countEl.innerHTML = `共 <strong>${total}</strong> 条匹配，当前显示 <strong>${records.length}</strong> 条`;
+        }
+
+        if (!response.ok) {
+            listEl.innerHTML = `<div class="no-results-hint">查询失败，请检查筛选条件<div class="tip">错误信息已在上方显示</div></div>`;
             return;
         }
-        
+
+        if (records.length === 0) {
+            const hasFilter = filters.task_id || filters.action_type || filters.start_date ||
+                              filters.end_date || filters.keyword;
+            if (hasFilter) {
+                listEl.innerHTML = `
+                    <div class="no-results-hint">
+                        😕 没有匹配的历史记录
+                        <div class="tip">试试放宽筛选条件，或点击"重置"清空所有筛选</div>
+                    </div>`;
+            } else {
+                listEl.innerHTML = '<p class="empty">暂无历史记录</p>';
+            }
+            return;
+        }
+
         const typeLabels = {
             'create': '创建',
             'generate': '生成方案',
@@ -1308,25 +1470,65 @@ async function loadHistory() {
             'export': '导出',
             'import': '导入'
         };
-        
-        listEl.innerHTML = data.map(h => `
+
+        listEl.innerHTML = records.map(h => `
             <div class="history-item">
                 <div class="history-time">${h.created_at}</div>
-                <div class="history-action">${typeLabels[h.action] || h.action}${h.task_id ? ` - 任务 #${h.task_id}` : ''}</div>
-                <div class="history-detail">${h.detail}</div>
+                <div class="history-action">${typeLabels[h.action] || h.action}${h.task_id ? ` - 任务 #${h.task_id}` : ''} <span style="color:#999;font-size:12px;font-weight:normal;">[${h.action_type}]</span></div>
+                <div class="history-detail">${h.detail ? h.detail.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '-'}</div>
             </div>
         `).join('');
     } catch (e) {
         console.error(e);
+        renderHistoryErrors(['加载失败: ' + e.message]);
+        renderHistoryWarnings([]);
+        const countEl = document.getElementById('history-count-info');
+        if (countEl) countEl.textContent = '加载失败';
     }
 }
 
 function exportHistoryJson() {
-    window.open(`${API_BASE}/history/export/json`);
+    const filters = getHistoryFilters();
+    const qs = buildHistoryQueryString(filters);
+    const url = `${API_BASE}/history/export/json${qs ? '?' + qs : ''}`;
+    fetch(url).then(async r => {
+        if (!r.ok) {
+            try {
+                const err = await r.json();
+                showToast('导出失败: ' + (err.error || r.statusText), 'error');
+            } catch {
+                showToast('导出失败: HTTP ' + r.status, 'error');
+            }
+            return;
+        }
+        window.open(url, '_blank');
+        showToast('导出 JSON 已开始下载', 'success');
+        setTimeout(() => loadHistory(), 800);
+    }).catch(e => {
+        showToast('导出失败: ' + e.message, 'error');
+    });
 }
 
 function exportHistoryCsv() {
-    window.open(`${API_BASE}/history/export/csv`);
+    const filters = getHistoryFilters();
+    const qs = buildHistoryQueryString(filters);
+    const url = `${API_BASE}/history/export/csv${qs ? '?' + qs : ''}`;
+    fetch(url).then(async r => {
+        if (!r.ok) {
+            try {
+                const err = await r.json();
+                showToast('导出失败: ' + (err.error || r.statusText), 'error');
+            } catch {
+                showToast('导出失败: HTTP ' + r.status, 'error');
+            }
+            return;
+        }
+        window.open(url, '_blank');
+        showToast('导出 CSV 已开始下载', 'success');
+        setTimeout(() => loadHistory(), 800);
+    }).catch(e => {
+        showToast('导出失败: ' + e.message, 'error');
+    });
 }
 
 async function quickSetup() {

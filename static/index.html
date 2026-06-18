@@ -136,11 +136,68 @@
             <section id="tab-history" class="tab-content">
                 <div class="history-section">
                     <h2>操作历史</h2>
-                    <div class="history-actions">
-                        <button onclick="loadHistory()">刷新</button>
-                        <button onclick="exportHistoryJson()">导出 JSON</button>
-                        <button onclick="exportHistoryCsv()">导出 CSV</button>
+
+                    <div class="history-filter-bar">
+                        <div class="filter-row">
+                            <div class="filter-field">
+                                <label>任务</label>
+                                <select id="history-filter-task">
+                                    <option value="">全部任务</option>
+                                </select>
+                            </div>
+                            <div class="filter-field">
+                                <label>操作类型</label>
+                                <select id="history-filter-action">
+                                    <option value="">全部类型</option>
+                                </select>
+                            </div>
+                            <div class="filter-field">
+                                <label>起始日期</label>
+                                <input type="date" id="history-filter-start">
+                            </div>
+                            <div class="filter-field">
+                                <label>结束日期</label>
+                                <input type="date" id="history-filter-end">
+                            </div>
+                        </div>
+                        <div class="filter-row">
+                            <div class="filter-field filter-keyword">
+                                <label>关键词搜索</label>
+                                <input type="text" id="history-filter-keyword" placeholder="搜索 action/detail/operator...">
+                            </div>
+                            <div class="filter-field filter-limit">
+                                <label>返回条数</label>
+                                <select id="history-filter-limit">
+                                    <option value="20">20</option>
+                                    <option value="50" selected>50</option>
+                                    <option value="100">100</option>
+                                    <option value="200">200</option>
+                                    <option value="500">500</option>
+                                    <option value="1000">1000</option>
+                                </select>
+                            </div>
+                            <div class="filter-actions">
+                                <button class="btn-primary" onclick="applyHistoryFilters()">🔍 应用筛选</button>
+                                <button onclick="resetHistoryFilters()">↺ 重置</button>
+                            </div>
+                        </div>
                     </div>
+
+                    <div id="history-filter-summary" class="history-filter-summary hidden"></div>
+                    <div id="history-warnings" class="history-warnings hidden"></div>
+                    <div id="history-errors" class="history-errors hidden"></div>
+
+                    <div class="history-actions">
+                        <div class="history-count">
+                            <span id="history-count-info">共 0 条匹配，显示 0 条</span>
+                        </div>
+                        <div class="history-action-buttons">
+                            <button onclick="loadHistory()">🔄 刷新</button>
+                            <button onclick="exportHistoryJson()">📄 导出 JSON</button>
+                            <button onclick="exportHistoryCsv()">📊 导出 CSV</button>
+                        </div>
+                    </div>
+
                     <div id="history-list" class="history-list">
                         <p class="empty">暂无历史记录</p>
                     </div>

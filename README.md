@@ -235,12 +235,123 @@ curl -X POST http://localhost:5000/api/tasks/import?conflict_mode=rename \
 - **撤销批准**：已批准的任务可以撤销，库存自动退回
 - **驳回**：待复核的任务可以驳回，驳回后可重新生成方案
 
-#### 步骤7：历史记录
+#### 步骤7：历史记录（高级筛选 + 导出）
 
 打开 **"历史记录"** 标签页：
-- 查看所有操作历史
-- 支持按任务筛选
-- 支持 JSON/CSV 导出
+
+##### 🔍 筛选条件（全部可选，组合生效）
+
+| 筛选项 | 说明 | 持久化 |
+|--------|------|--------|
+| **任务** | 下拉选择某个任务，只看该任务相关记录（创建、生成、批准、撤销、驳回等） | ✅ 刷新后保留（localStorage） |
+| **操作类型** | 按 action_type 精确筛选（创建任务/生成方案/批准/驳回/回滚快照/导出历史等 20+ 种） | ✅ 刷新后保留 |
+| **起始日期** | `YYYY-MM-DD`，筛选 `created_at >= 该日 00:00:00` | ✅ 刷新后保留 |
+| **结束日期** | `YYYY-MM-DD`，筛选 `created_at <= 该日 23:59:59` | ✅ 刷新后保留 |
+| **关键词搜索** | 模糊匹配 `action` / `action_type` / `detail` / `operator` / `task_id`，包含即命中 | ✅ 刷新后保留 |
+| **返回条数** | 20 / 50 / 100 / 200 / 500 / 1000；接口最大 5000，超限自动截断并警告 | ✅ 刷新后保留 |
+
+点击 **"🔍 应用筛选"** 生效并持久化；点击 **"↺ 重置"** 清空所有筛选并移除本地存储。
+
+##### 📊 页面信息
+
+- **筛选摘要条**（蓝色）：显示当前所有已应用的筛选条件，一目了然
+- **警告条**（橙色）：`limit` 超过上限被截断、未知操作类型等非致命警告
+- **错误条**（红色）：非法日期格式、`start_date > end_date`、`limit` 非正数等致命错误，此时 records 为空，HTTP 400
+- **结果计数**：`共 X 条匹配，当前显示 Y 条`（total 不依赖 limit，真实匹配数）
+- **无结果提示**：有筛选但 0 条时，显示"😕 没有匹配的历史记录 + 放宽条件建议"，不再是空白的"暂无"
+
+##### 📤 导出（与页面结果一致）
+
+| 按钮 | 接口 | 说明 |
+|------|------|------|
+| 📄 导出 JSON | `GET /api/history/export/json` | **吃同一套筛选 query 参数**，导出 JSON 含：`export_time`、`filter_summary`、`filters`（结构化）、`matched_count`、`exported_count`、`warnings`、`history`（仅匹配记录）、`tasks/samples/primers/reagents/inventory_logs` |
+| 📊 导出 CSV | `GET /api/history/export/csv` | **吃同一套筛选 query 参数**，CSV 文件头 4 行注释：导出时间、筛选条件摘要、匹配/导出条数、警告。字段列：`id, task_id, action, action_type, detail, operator, created_at` |
+
+> ✅ 导出动作本身会写入 `history` 表，`action=export`，`action_type=history_exported_json` 或 `history_exported_csv`，detail 字段包含筛选摘要 + 匹配数 + 导出数，可用于审计"谁在何时导出了什么范围的数据"。
+
+##### 🔧 接口参数总览（所有 history 接口统一参数）
+
+`GET /api/history`、`GET /api/history/export/json`、`GET /api/history/export/csv` 均接受以下 **query 参数**（全部可选）：
+
+| 参数 | 类型 | 默认 | 校验 & 行为 |
+|------|------|------|-------------|
+| `task_id` | int | — | 非整数 → HTTP 400 |
+| `action_type` | string | — | 不在已知列表中 → 警告 + 正常查询（可能 0 条） |
+| `start_date` | string | — | 非法格式（不是 `YYYY-MM-DD[ HH:MM[:SS]]`）→ HTTP 400 |
+| `end_date` | string | — | 非法格式 → HTTP 400；仅日期时补到 `23:59:59` |
+| `keyword` | string | — | 空字符串等同未提供；前后空白自动 trim |
+| `limit` | int | 100 | `<1` → HTTP 400；`>5000` → 警告 + 截断为 5000 |
+
+`GET /api/history` 响应结构（200 或 400 均返回 JSON）：
+
+```json
+{
+  "records": [ { "id": 1, "task_id": 2, "action": "create", "action_type": "task_created", "detail": "...", "operator": "system", "created_at": "2025-..." }, ... ],
+  "total": 42,
+  "filters": "任务#2 | 操作类型:创建任务 | 起始:2025-01-01 00:00:00 | 条数上限:100",
+  "errors": [],
+  "warnings": []
+}
+```
+
+`GET /api/history/filters` 返回前端填充筛选下拉所需的元数据：`{ tasks, action_types, max_limit, default_limit }`。
+
+##### 🧪 验证命令（curl / PowerShell）
+
+**1️⃣ 组合筛选（按任务 + 批准操作 + 时间范围 + 关键词）**
+```bash
+curl -s "http://localhost:5000/api/history?task_id=1&action_type=task_approved&start_date=2025-01-01&end_date=2025-12-31&keyword=库存&limit=50" | jq '{total, filters, count: .records | length}'
+```
+
+**PowerShell 版本：**
+```powershell
+(iwr "http://localhost:5000/api/history?task_id=1&action_type=task_approved&start_date=2025-01-01&end_date=2025-12-31&keyword=库存&limit=50").Content | ConvertFrom-Json | Select-Object total, filters, @{n='count';e={$_.records.Count}}
+```
+
+**2️⃣ 关键词无结果（确认返回友好提示而非空白）**
+```bash
+curl -s "http://localhost:5000/api/history?keyword=这个关键词肯定不存在xyz123" | jq '{total, count: .records | length, errors, warnings}'
+```
+期望：`total=0, count=0, errors=[], warnings=[]`（HTTP 200，非 500）
+
+**3️⃣ 非法日期拦截（HTTP 400 + 清晰错误）**
+```bash
+curl -v "http://localhost:5000/api/history?start_date=2025/01/01"
+# 期望: HTTP 400，body.errors 包含 "start_date 格式不合法，请使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS"
+
+curl -v "http://localhost:5000/api/history?start_date=2025-12-31&end_date=2025-01-01"
+# 期望: HTTP 400，body.errors 包含 "start_date 不能晚于 end_date"
+```
+
+**4️⃣ 过大 limit 自动截断（HTTP 200 + 警告提示）**
+```bash
+curl -s "http://localhost:5000/api/history?limit=99999" | jq '{warnings, returned: (.records | length)}'
+# 期望: warnings=["limit 超过上限 5000，已自动截断为 5000"], returned<=5000
+```
+
+**5️⃣ 按筛选导出 JSON（与页面结果一致）**
+```bash
+curl -s -o filtered_history.json -w "HTTP %{http_code}, size=%{size_download}\n" \
+  "http://localhost:5000/api/history/export/json?action_type=snapshot_created&limit=100"
+# 期望: HTTP 200，JSON 文件中 filter_summary / matched_count / exported_count 与查询接口一致
+jq '{filter_summary, matched_count, exported_count, history_count: (.history | length)}' filtered_history.json
+```
+
+**6️⃣ 按筛选导出 CSV（首行注释带筛选摘要）**
+```bash
+curl -s -o filtered_history.csv "http://localhost:5000/api/history/export/csv?task_id=1&limit=50"
+# 期望: CSV 前 4 行以 # 开头，分别是 导出时间 / 筛选条件 / 匹配+导出条数 / 警告
+head -6 filtered_history.csv
+```
+
+**7️⃣ 刷新保留筛选条件 + 服务重启后查询一致（GUI 验证）**
+```
+① 在浏览器历史记录页 → 设置任务=某任务 + 操作类型=生成方案 + 关键词=方案 + limit=20
+② 点 "🔍 应用筛选"，记下显示的 "共 X 条匹配"
+③ 按 F5 刷新页面 → 筛选控件值自动恢复，结果与刷新前完全一致
+④ 停掉服务（Ctrl+C）→ 重新执行 python run.py 启动
+⑤ 再次进入历史记录页 → 点刷新 → 查询接口正常返回，数据与重启前一致（SQLite 持久化）
+```
 
 ### 验证命令
 
@@ -437,9 +548,10 @@ zgw-00139/
 | **POST** | **`/api/tasks/<id>/edit/validate`** | **校验编辑数据**（孔位冲突/模板/范围/样本/库存拦截，返回 valid/errors/warnings） |
 | **POST** | **`/api/tasks/<id>/edit/diff`** | **计算编辑差异**（总体积/模板/孔位增删改摘要） |
 | **POST** | **`/api/tasks/<id>/edit`** | **保存编辑**（pre_edit + edit 双快照 + 写历史 + 状态重置为 draft。已批准/已撤销返回 409） |
-| GET | `/api/history` | 历史记录 |
-| GET | `/api/history/export/json` | 导出历史 JSON |
-| GET | `/api/history/export/csv` | 导出历史 CSV |
+| **GET** | **`/api/history`** | **历史记录（带高级筛选）**。query 参数（均可选）：`task_id`(int)、`action_type`(string)、`start_date`(YYYY-MM-DD)、`end_date`(YYYY-MM-DD)、`keyword`(模糊搜索)、`limit`(int, 默认100, 上限5000)。返回 `{records, total, filters, errors, warnings}`。参数错误时 HTTP 400 + errors 明细 |
+| **GET** | **`/api/history/filters`** | **筛选元数据**。返回任务列表、所有操作类型枚举、`max_limit=5000`、`default_limit=100`，用于前端填充下拉选项 |
+| **GET** | **`/api/history/export/json`** | **导出历史 JSON（吃同一套筛选参数）**。与页面查询完全一致的 query 参数。导出文件含 `export_time`、`filter_summary`、`filters`、`matched_count`、`exported_count`、匹配的 `history[]`。导出动作本身写入 history 表 |
+| **GET** | **`/api/history/export/csv`** | **导出历史 CSV（吃同一套筛选参数）**。与页面查询完全一致的 query 参数。CSV 前 4 行 `#` 注释：导出时间 / 筛选摘要 / 匹配+导出条数 / 警告。导出动作本身写入 history 表 |
 | GET | `/api/reports/task/<task_id>` | 获取任务报告（内嵌 JSON） |
 | GET | `/api/reports/task/<task_id>/json` | 导出任务报告 JSON |
 | GET | `/api/reports/task/<task_id>/csv` | 导出任务报告 CSV |
