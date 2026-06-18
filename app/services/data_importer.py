@@ -52,7 +52,7 @@ class DataImporter:
     
     @staticmethod
     def parse_reagents_csv(csv_content):
-        reagents = []
+        results = []
         reader = csv.DictReader(io.StringIO(csv_content))
         
         for row in reader:
@@ -67,14 +67,38 @@ class DataImporter:
                 'min_pipette_unit': row.get('min_pipette_unit', 'ul').strip() if row.get('min_pipette_unit') else 'ul',
                 'description': row.get('description', '').strip(),
             }
+            
+            batch = {
+                'batch_number': row.get('batch_number', '').strip(),
+                'expiry_date': row.get('expiry_date', '').strip() or None,
+                'is_frozen': False,
+                'min_usable_volume': None,
+                'min_usable_unit': 'ul',
+            }
+            
+            frozen_raw = (row.get('frozen', '') or row.get('is_frozen', '')).strip().lower()
+            batch['is_frozen'] = frozen_raw in ['1', 'true', 'yes', '是', '冻结']
+            
+            if row.get('min_usable_volume'):
+                try:
+                    batch['min_usable_volume'] = float(row['min_usable_volume'])
+                except (ValueError, TypeError):
+                    batch['min_usable_volume'] = None
+            batch['min_usable_unit'] = (row.get('min_usable_unit') or 'ul').strip()
+            
             if reagent['name']:
                 if not UnitConverter.is_volume_unit(reagent['volume_unit']):
                     raise ValueError(f"试剂 {reagent['name']} 的体积单位无效: {reagent['volume_unit']}")
                 if reagent.get('min_pipette_unit') and not UnitConverter.is_volume_unit(reagent['min_pipette_unit']):
                     raise ValueError(f"试剂 {reagent['name']} 的最小移液单位无效: {reagent['min_pipette_unit']}")
-                reagents.append(reagent)
+                if batch['min_usable_volume'] is not None and not UnitConverter.is_volume_unit(batch['min_usable_unit']):
+                    raise ValueError(f"试剂 {reagent['name']} 批次 {batch['batch_number']} 的最小可用量单位无效: {batch['min_usable_unit']}")
+                results.append({
+                    'reagent': reagent,
+                    'batch': batch,
+                })
         
-        return reagents
+        return results
     
     @staticmethod
     def parse_template_csv(csv_content):

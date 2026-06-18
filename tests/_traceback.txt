@@ -1,0 +1,13 @@
+EXCEPTION: 'str' object has no attribute 'get'
+
+Traceback (most recent call last):
+  File "D:\workSpace\AI__SPACE\02-label\zgw-00139\tests\test_batches.py", line 624, in <module>
+    main()
+    ~~~~^^
+  File "D:\workSpace\AI__SPACE\02-label\zgw-00139\tests\test_batches.py", line 601, in main
+    test_scenario_4_approve_deduct_and_revoke_rollback(client, task_intercept)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\workSpace\AI__SPACE\02-label\zgw-00139\tests\test_batches.py", line 477, in test_scenario_4_approve_deduct_and_revoke_rollback
+    detail = h.get('detail', '') or ''
+             ^^^^^
+AttributeError: 'str' object has no attribute 'get'

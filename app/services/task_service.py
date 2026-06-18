@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app.services.unit_converter import UnitConverter
 from app.services.liquid_handling_engine import LiquidHandlingEngine
+from app.services.batch_service import BatchService
 
 
 class TaskService:
@@ -10,6 +11,7 @@ class TaskService:
     def __init__(self, db):
         self.db = db
         self.engine = LiquidHandlingEngine()
+        self.batch_service = BatchService(db)
     
     def create_task(self, name, template_id, total_volume, volume_unit='ul'):
         if not UnitConverter.is_volume_unit(volume_unit):
@@ -272,11 +274,36 @@ class TaskService:
                     0, 'ul', well_dict.get('note', '')
                 ))
         
+        batch_allocations_summary = []
         for key, usage in reagent_usage.items():
-            self.db.execute('''
-                INSERT INTO task_reagent_usage (task_id, reagent_id, reagent_name, used_volume, used_volume_unit, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (task_id, usage['id'], usage['name'], usage['volume'], usage['unit'], usage['source']))
+            required_ul = UnitConverter.convert_volume(
+                usage['volume'], usage['unit'], 'ul'
+            )
+            try:
+                allocations = self.batch_service.allocate_batches(usage['id'], required_ul)
+            except ValueError as e:
+                raise ValueError(f'试剂 {usage["name"]} 批次分配失败: {str(e)}')
+            
+            for alloc in allocations:
+                self.db.execute('''
+                    INSERT INTO task_reagent_usage 
+                    (task_id, reagent_id, reagent_name, batch_id, batch_number, 
+                     used_volume, used_volume_unit, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task_id, usage['id'], usage['name'],
+                    alloc['batch_id'], alloc['batch_number'],
+                    alloc['allocated_volume_ul'], 'ul',
+                    usage['source']
+                ))
+                batch_allocations_summary.append({
+                    'reagent_name': usage['name'],
+                    'batch_number': alloc['batch_number'],
+                    'volume': alloc['allocated_volume_ul'],
+                    'unit': 'ul',
+                    'expiry_date': alloc.get('expiry_date'),
+                    'source': usage['source'],
+                })
         
         self.db.execute('''
             INSERT INTO task_primer_usage (task_id, primer_id, primer_name, used_volume, used_volume_unit, source)
@@ -293,8 +320,20 @@ class TaskService:
         snapshot_service = SnapshotService(self.db)
         snapshot_info = snapshot_service.create_snapshot(task_id, 'generate', '生成配液方案')
 
+        batch_desc_parts = []
+        by_reagent = {}
+        for b in batch_allocations_summary:
+            key = b['reagent_name']
+            if key not in by_reagent:
+                by_reagent[key] = []
+            by_reagent[key].append(f"{b['batch_number']}({b['volume']:.1f}{b['unit']})")
+        for name, batches in by_reagent.items():
+            batch_desc_parts.append(f"{name}: {', '.join(batches)}")
+        batch_desc = '; '.join(batch_desc_parts) if batch_desc_parts else '无'
+
         self._add_history(task_id, 'generate', 'plan_generated',
-                          f'生成配液方案，{len(template_wells)} 个孔位，{len(all_warnings)} 个警告，快照 v{snapshot_info["version"]}')
+                          f'生成配液方案，{len(template_wells)} 个孔位，{len(all_warnings)} 个警告，'
+                          f'批次分配: {batch_desc}，快照 v{snapshot_info["version"]}')
 
         return {
             'task_id': task_id,
@@ -304,6 +343,7 @@ class TaskService:
             'snapshot_version': snapshot_info['version'],
             'reagent_usage': [{'name': v['name'], 'volume': v['volume'], 'unit': v['unit'], 'source': v['source']}
                              for v in reagent_usage.values()],
+            'batch_allocations': batch_allocations_summary,
             'primer_usage': {'name': primer['name'], 'volume': primer_usage['total'], 'unit': 'ul'},
         }
     
@@ -338,13 +378,13 @@ class TaskService:
         if has_min_pipette_warning and not ignore_min_pipette:
             raise ValueError('存在低于最小移液体积的孔，不能直接批准。如有偏差，请添加偏差备注后再批准。')
         
-        reagent_usage = self.db.execute(
+        reagent_usage = [dict(r) for r in self.db.execute(
             'SELECT * FROM task_reagent_usage WHERE task_id = ?', (task_id,)
-        ).fetchall()
+        ).fetchall()]
         
-        primer_usage = self.db.execute(
+        primer_usage = [dict(r) for r in self.db.execute(
             'SELECT * FROM task_primer_usage WHERE task_id = ?', (task_id,)
-        ).fetchall()
+        ).fetchall()]
         
         for usage in reagent_usage:
             reagent = self.db.execute(
@@ -354,15 +394,32 @@ class TaskService:
             if not reagent:
                 raise ValueError(f'试剂不存在: {usage["reagent_name"]}')
             
-            available_vol = UnitConverter.convert_volume(
-                reagent['volume'], reagent['volume_unit'], 'ul'
-            )
             used_vol = UnitConverter.convert_volume(
                 usage['used_volume'], usage['used_volume_unit'], 'ul'
             )
             
-            if available_vol < used_vol:
-                raise ValueError(f'试剂库存不足: {reagent["name"]}, 可用 {available_vol:.2f} µL, 需要 {used_vol:.2f} µL')
+            if usage.get('batch_id'):
+                batch = self.db.execute(
+                    'SELECT * FROM reagent_batches WHERE id = ?', (usage['batch_id'],)
+                ).fetchone()
+                if not batch:
+                    raise ValueError(
+                        f'试剂 {usage["reagent_name"]} 的批次 {usage.get("batch_number", "")} 不存在，可能已被删除'
+                    )
+                available_vol = UnitConverter.convert_volume(
+                    batch['volume'], batch['volume_unit'], 'ul'
+                )
+                if available_vol < used_vol:
+                    raise ValueError(
+                        f'试剂 {reagent["name"]} 批次 {batch["batch_number"]} 库存不足: '
+                        f'可用 {available_vol:.2f} µL, 需要 {used_vol:.2f} µL'
+                    )
+            else:
+                available_vol = UnitConverter.convert_volume(
+                    reagent['volume'], reagent['volume_unit'], 'ul'
+                )
+                if available_vol < used_vol:
+                    raise ValueError(f'试剂库存不足: {reagent["name"]}, 可用 {available_vol:.2f} µL, 需要 {used_vol:.2f} µL')
         
         for usage in primer_usage:
             primer = self.db.execute(
@@ -382,37 +439,60 @@ class TaskService:
             if available_vol < used_vol:
                 raise ValueError(f'引物库存不足: {primer["name"]}, 可用 {available_vol:.2f} µL, 需要 {used_vol:.2f} µL')
         
+        batch_deduct_details = []
         for usage in reagent_usage:
             reagent = self.db.execute(
                 'SELECT * FROM reagents WHERE id = ?', (usage['reagent_id'],)
             ).fetchone()
             
-            current_vol_ul = UnitConverter.convert_volume(
-                reagent['volume'], reagent['volume_unit'], 'ul'
-            )
             used_vol_ul = UnitConverter.convert_volume(
                 usage['used_volume'], usage['used_volume_unit'], 'ul'
             )
-            new_vol_ul = current_vol_ul - used_vol_ul
             
-            new_vol = UnitConverter.convert_volume(new_vol_ul, 'ul', reagent['volume_unit'])
+            if usage.get('batch_id'):
+                new_vol_ul = self.batch_service.deduct_batch_volume(
+                    usage['batch_id'], used_vol_ul, task_id=task_id,
+                    note=f'任务 #{task_id} 批准扣减'
+                )
+                batch_deduct_details.append(
+                    f'{reagent["name"]}-{usage.get("batch_number", "")}: -{used_vol_ul:.1f}ul (余 {new_vol_ul:.1f}ul)'
+                )
+            else:
+                current_vol_ul = UnitConverter.convert_volume(
+                    reagent['volume'], reagent['volume_unit'], 'ul'
+                )
+                new_vol_ul = current_vol_ul - used_vol_ul
+                new_vol = UnitConverter.convert_volume(new_vol_ul, 'ul', reagent['volume_unit'])
+                
+                self.db.execute(
+                    'UPDATE reagents SET volume = ? WHERE id = ?',
+                    (new_vol, usage['reagent_id'])
+                )
+                
+                self.db.execute('''
+                    INSERT INTO reagent_inventory_log 
+                    (reagent_id, change_type, change_volume, change_volume_unit, 
+                     balance_volume, balance_volume_unit, task_id, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    usage['reagent_id'], 'deduct', 
+                    usage['used_volume'], usage['used_volume_unit'],
+                    new_vol_ul, 'ul',
+                    task_id, f'任务 #{task_id} 扣减'
+                ))
+                batch_deduct_details.append(f'{reagent["name"]}: -{used_vol_ul:.1f}ul')
             
+            current_vol_ul = UnitConverter.convert_volume(
+                reagent['volume'], reagent['volume_unit'], 'ul'
+            )
+            new_reagent_total_ul = max(0.0, current_vol_ul - used_vol_ul)
+            new_reagent_total = UnitConverter.convert_volume(
+                new_reagent_total_ul, 'ul', reagent['volume_unit']
+            )
             self.db.execute(
                 'UPDATE reagents SET volume = ? WHERE id = ?',
-                (new_vol, usage['reagent_id'])
+                (new_reagent_total, usage['reagent_id'])
             )
-            
-            self.db.execute('''
-                INSERT INTO reagent_inventory_log 
-                (reagent_id, change_type, change_volume, change_volume_unit, 
-                 balance_volume, balance_volume_unit, task_id, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                usage['reagent_id'], 'deduct', 
-                usage['used_volume'], usage['used_volume_unit'],
-                new_vol_ul, 'ul',
-                task_id, f'任务 #{task_id} 扣减'
-            ))
         
         for usage in primer_usage:
             primer = self.db.execute(
@@ -452,8 +532,9 @@ class TaskService:
         )
         self.db.commit()
         
+        batch_desc = '; '.join(batch_deduct_details) if batch_deduct_details else '无批次明细'
         self._add_history(task_id, 'approve', 'task_approved', 
-                          f'任务已批准，扣减库存。操作人: {operator}')
+                          f'任务已批准，扣减库存（批次: {batch_desc}）。操作人: {operator}')
         
         return True
     
@@ -476,7 +557,7 @@ class TaskService:
         
         return True
     
-    def revoke_approval(self, task_id, operator='user'):
+    def revoke_approval(self, task_id, operator='user', force=False):
         task = self.db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
         if not task:
             raise ValueError('任务不存在')
@@ -484,45 +565,84 @@ class TaskService:
         if task['status'] != 'approved':
             raise ValueError('只有已批准的任务才能撤销确认')
         
-        reagent_usage = self.db.execute(
+        conflicts = self.batch_service.check_revoke_conflicts(task_id)
+        if conflicts and not force:
+            conflict_msgs = []
+            for c in conflicts:
+                task_refs = ', '.join(
+                    f'任务 #{t["task_id"]} ({t["task_name"]})' for t in c['conflicting_tasks']
+                )
+                conflict_msgs.append(
+                    f'试剂 {c["reagent_name"]} 批次 {c["batch_number"]} 已被后续已批准任务占用: {task_refs}'
+                )
+            raise ValueError(
+                '撤销失败：以下批次已被后续已批准的任务占用，无法直接退回。'
+                '如需强制撤销请使用 force 参数，但请注意这可能导致后续任务库存为负。'
+                ' 具体: ' + ' | '.join(conflict_msgs)
+            )
+        
+        reagent_usage = [dict(r) for r in self.db.execute(
             'SELECT * FROM task_reagent_usage WHERE task_id = ?', (task_id,)
-        ).fetchall()
+        ).fetchall()]
         
-        primer_usage = self.db.execute(
+        primer_usage = [dict(r) for r in self.db.execute(
             'SELECT * FROM task_primer_usage WHERE task_id = ?', (task_id,)
-        ).fetchall()
+        ).fetchall()]
         
+        batch_refund_details = []
         for usage in reagent_usage:
             reagent = self.db.execute(
                 'SELECT * FROM reagents WHERE id = ?', (usage['reagent_id'],)
             ).fetchone()
             
-            current_vol_ul = UnitConverter.convert_volume(
-                reagent['volume'], reagent['volume_unit'], 'ul'
-            )
             used_vol_ul = UnitConverter.convert_volume(
                 usage['used_volume'], usage['used_volume_unit'], 'ul'
             )
-            new_vol_ul = current_vol_ul + used_vol_ul
             
-            new_vol = UnitConverter.convert_volume(new_vol_ul, 'ul', reagent['volume_unit'])
+            if usage.get('batch_id'):
+                new_vol_ul = self.batch_service.refund_batch_volume(
+                    usage['batch_id'], used_vol_ul, task_id=task_id,
+                    note=f'任务 #{task_id} 撤销确认，退回库存'
+                )
+                batch_refund_details.append(
+                    f'{reagent["name"]}-{usage.get("batch_number", "")}: +{used_vol_ul:.1f}ul (现 {new_vol_ul:.1f}ul)'
+                )
+            else:
+                current_vol_ul = UnitConverter.convert_volume(
+                    reagent['volume'], reagent['volume_unit'], 'ul'
+                )
+                new_vol_ul = current_vol_ul + used_vol_ul
+                new_vol = UnitConverter.convert_volume(new_vol_ul, 'ul', reagent['volume_unit'])
+                
+                self.db.execute(
+                    'UPDATE reagents SET volume = ? WHERE id = ?',
+                    (new_vol, usage['reagent_id'])
+                )
+                
+                self.db.execute('''
+                    INSERT INTO reagent_inventory_log 
+                    (reagent_id, change_type, change_volume, change_volume_unit, 
+                     balance_volume, balance_volume_unit, task_id, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    usage['reagent_id'], 'refund', 
+                    usage['used_volume'], usage['used_volume_unit'],
+                    new_vol_ul, 'ul',
+                    task_id, f'任务 #{task_id} 撤销确认，退回库存'
+                ))
+                batch_refund_details.append(f'{reagent["name"]}: +{used_vol_ul:.1f}ul')
             
+            current_vol_ul = UnitConverter.convert_volume(
+                reagent['volume'], reagent['volume_unit'], 'ul'
+            )
+            new_reagent_total_ul = current_vol_ul + used_vol_ul
+            new_reagent_total = UnitConverter.convert_volume(
+                new_reagent_total_ul, 'ul', reagent['volume_unit']
+            )
             self.db.execute(
                 'UPDATE reagents SET volume = ? WHERE id = ?',
-                (new_vol, usage['reagent_id'])
+                (new_reagent_total, usage['reagent_id'])
             )
-            
-            self.db.execute('''
-                INSERT INTO reagent_inventory_log 
-                (reagent_id, change_type, change_volume, change_volume_unit, 
-                 balance_volume, balance_volume_unit, task_id, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                usage['reagent_id'], 'refund', 
-                usage['used_volume'], usage['used_volume_unit'],
-                new_vol_ul, 'ul',
-                task_id, f'任务 #{task_id} 撤销确认，退回库存'
-            ))
         
         for usage in primer_usage:
             primer = self.db.execute(
@@ -562,8 +682,10 @@ class TaskService:
         )
         self.db.commit()
         
+        batch_desc = '; '.join(batch_refund_details) if batch_refund_details else '无批次明细'
+        force_note = '（强制撤销，后续任务可能出现负库存）' if force else ''
         self._add_history(task_id, 'revoke', 'approval_revoked', 
-                          f'撤销确认，库存已退回。操作人: {operator}')
+                          f'撤销确认，库存已退回{force_note}（批次: {batch_desc}）。操作人: {operator}')
         
         return True
     
@@ -1140,14 +1262,55 @@ class TaskService:
         ).fetchall()
         
         if reagent_usage:
+            reagent_usage_by_id = {}
             for usage in reagent_usage:
-                self.db.execute('''
-                    INSERT INTO task_reagent_usage (task_id, reagent_id, reagent_name, used_volume, used_volume_unit, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    new_task_id, usage['reagent_id'], usage['reagent_name'],
-                    usage['used_volume'], usage['used_volume_unit'], usage['source']
-                ))
+                key = usage['reagent_id']
+                if key not in reagent_usage_by_id:
+                    reagent_usage_by_id[key] = {
+                        'id': usage['reagent_id'],
+                        'name': usage['reagent_name'],
+                        'volume': 0.0,
+                        'unit': usage['used_volume_unit'],
+                        'source': usage['source'],
+                    }
+                add_ul = UnitConverter.convert_volume(
+                    usage['used_volume'], usage['used_volume_unit'], 'ul'
+                )
+                cur_ul = UnitConverter.convert_volume(
+                    reagent_usage_by_id[key]['volume'],
+                    reagent_usage_by_id[key]['unit'],
+                    'ul'
+                )
+                new_total_ul = cur_ul + add_ul
+                reagent_usage_by_id[key]['volume'] = UnitConverter.convert_volume(
+                    new_total_ul, 'ul', reagent_usage_by_id[key]['unit']
+                )
+            
+            for key, usage in reagent_usage_by_id.items():
+                required_ul = UnitConverter.convert_volume(
+                    usage['volume'], usage['unit'], 'ul'
+                )
+                try:
+                    allocations = self.batch_service.allocate_batches(usage['id'], required_ul)
+                except ValueError as e:
+                    allocations = [{
+                        'batch_id': None,
+                        'batch_number': None,
+                        'allocated_volume_ul': required_ul,
+                    }]
+                
+                for alloc in allocations:
+                    self.db.execute('''
+                        INSERT INTO task_reagent_usage 
+                        (task_id, reagent_id, reagent_name, batch_id, batch_number,
+                         used_volume, used_volume_unit, source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        new_task_id, usage['id'], usage['name'],
+                        alloc.get('batch_id'), alloc.get('batch_number'),
+                        alloc['allocated_volume_ul'], 'ul',
+                        usage['source']
+                    ))
         
         primer_usage = self.db.execute(
             'SELECT * FROM task_primer_usage WHERE task_id = ?',
@@ -1192,7 +1355,9 @@ class TaskService:
         ).fetchall()
 
         reagent_usage = self.db.execute(
-            'SELECT reagent_name, source, used_volume, used_volume_unit FROM task_reagent_usage WHERE task_id = ?',
+            '''SELECT reagent_name, source, used_volume, used_volume_unit, 
+                      batch_id, batch_number 
+               FROM task_reagent_usage WHERE task_id = ?''',
             (task_id,)
         ).fetchall()
 
@@ -1350,19 +1515,49 @@ class TaskService:
                     ))
 
             if reagent_usage:
+                usage_by_reagent = {}
                 for usage in reagent_usage:
+                    name = usage['reagent_name']
+                    if name not in usage_by_reagent:
+                        usage_by_reagent[name] = {
+                            'name': name,
+                            'volume_ul': 0.0,
+                            'source': usage.get('source', ''),
+                        }
+                    add_ul = UnitConverter.convert_volume(
+                        usage.get('used_volume', 0),
+                        usage.get('used_volume_unit', 'ul'),
+                        'ul'
+                    )
+                    usage_by_reagent[name]['volume_ul'] += add_ul
+                
+                for name, summary in usage_by_reagent.items():
                     reagent = self.db.execute(
-                        'SELECT id FROM reagents WHERE name = ?', (usage['reagent_name'],)
+                        'SELECT * FROM reagents WHERE name = ?', (name,)
                     ).fetchone()
-                    if reagent:
+                    if not reagent:
+                        continue
+                    try:
+                        allocations = self.batch_service.allocate_batches(
+                            reagent['id'], summary['volume_ul']
+                        )
+                    except ValueError:
+                        allocations = [{
+                            'batch_id': None,
+                            'batch_number': usage.get('batch_number'),
+                            'allocated_volume_ul': summary['volume_ul'],
+                        }]
+                    for alloc in allocations:
                         self.db.execute('''
-                            INSERT INTO task_reagent_usage (task_id, reagent_id, reagent_name, used_volume, used_volume_unit, source)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                            INSERT INTO task_reagent_usage 
+                            (task_id, reagent_id, reagent_name, batch_id, batch_number,
+                             used_volume, used_volume_unit, source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
-                            new_task_id, reagent['id'], usage['reagent_name'],
-                            usage.get('used_volume', 0),
-                            usage.get('used_volume_unit', 'ul'),
-                            usage.get('source', '')
+                            new_task_id, reagent['id'], name,
+                            alloc.get('batch_id'), alloc.get('batch_number'),
+                            alloc['allocated_volume_ul'], 'ul',
+                            summary['source']
                         ))
 
             if primer_usage:

@@ -475,7 +475,7 @@ curl -s "http://localhost:5000/api/history?action_type=history_exported_json&lim
 
 ### 验证命令
 
-运行完整测试套件（53 个测试用例）：
+运行完整测试套件（74 个测试用例）：
 
 **Windows PowerShell（推荐，自动处理编码）：**
 ```powershell

@@ -60,6 +60,22 @@ def init_db(app):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS reagent_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reagent_id INTEGER NOT NULL,
+            batch_number TEXT NOT NULL,
+            volume REAL NOT NULL,
+            volume_unit TEXT NOT NULL,
+            expiry_date TEXT,
+            is_frozen INTEGER NOT NULL DEFAULT 0,
+            min_usable_volume REAL,
+            min_usable_unit TEXT,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (reagent_id) REFERENCES reagents(id) ON DELETE CASCADE,
+            UNIQUE(reagent_id, batch_number)
+        );
+
         CREATE TABLE IF NOT EXISTS plate_templates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -131,11 +147,14 @@ def init_db(app):
             task_id INTEGER NOT NULL,
             reagent_id INTEGER NOT NULL,
             reagent_name TEXT NOT NULL,
+            batch_id INTEGER,
+            batch_number TEXT,
             used_volume REAL NOT NULL,
             used_volume_unit TEXT NOT NULL,
             source TEXT,
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-            FOREIGN KEY (reagent_id) REFERENCES reagents(id)
+            FOREIGN KEY (reagent_id) REFERENCES reagents(id),
+            FOREIGN KEY (batch_id) REFERENCES reagent_batches(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS task_primer_usage (
@@ -184,6 +203,8 @@ def init_db(app):
         CREATE TABLE IF NOT EXISTS reagent_inventory_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reagent_id INTEGER NOT NULL,
+            batch_id INTEGER,
+            batch_number TEXT,
             change_type TEXT NOT NULL,
             change_volume REAL NOT NULL,
             change_volume_unit TEXT NOT NULL,
@@ -193,6 +214,7 @@ def init_db(app):
             note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (reagent_id) REFERENCES reagents(id),
+            FOREIGN KEY (batch_id) REFERENCES reagent_batches(id) ON DELETE SET NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
 
@@ -232,6 +254,20 @@ def init_db(app):
     existing_cols = {row[1] for row in cur.fetchall()}
     if 'sample_name' not in existing_cols:
         conn.execute("ALTER TABLE template_wells ADD COLUMN sample_name TEXT")
+    
+    cur = conn.execute("PRAGMA table_info(task_reagent_usage)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if 'batch_id' not in existing_cols:
+        conn.execute("ALTER TABLE task_reagent_usage ADD COLUMN batch_id INTEGER")
+    if 'batch_number' not in existing_cols:
+        conn.execute("ALTER TABLE task_reagent_usage ADD COLUMN batch_number TEXT")
+    
+    cur = conn.execute("PRAGMA table_info(reagent_inventory_log)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if 'batch_id' not in existing_cols:
+        conn.execute("ALTER TABLE reagent_inventory_log ADD COLUMN batch_id INTEGER")
+    if 'batch_number' not in existing_cols:
+        conn.execute("ALTER TABLE reagent_inventory_log ADD COLUMN batch_number TEXT")
     
     conn.commit()
     conn.close()

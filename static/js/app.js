@@ -192,12 +192,46 @@ async function loadReagents() {
             return;
         }
         
-        listEl.innerHTML = data.map(r => `
-            <div class="item-row">
-                <div class="item-name">${r.name}</div>
-                <div class="item-info">类型: ${r.type} | 库存: ${r.volume} ${r.volume_unit}</div>
-            </div>
-        `).join('');
+        listEl.innerHTML = data.map(r => {
+            let batchHtml = '';
+            if (r.batches && r.batches.length > 0) {
+                batchHtml = '<div style="font-size:11px;color:#666;margin-top:4px;padding-left:10px;border-left:2px solid #ddd;">';
+                r.batches.forEach(b => {
+                    const tags = [];
+                    if (b.is_frozen) tags.push('<span style="color:#6c757d;">❄冻结</span>');
+                    let expClass = '';
+                    if (b.expiry_date) {
+                        const today = new Date();
+                        const exp = new Date(b.expiry_date);
+                        if (exp < today) {
+                            tags.push('<span style="color:#dc3545;">⚠已过期</span>');
+                            expClass = 'color:#dc3545;';
+                        } else {
+                            const diffDays = Math.ceil((exp - today) / (1000*60*60*24));
+                            if (diffDays <= 30) {
+                                tags.push('<span style="color:#ffc107;">⏰临期</span>');
+                                expClass = 'color:#ffc107;';
+                            }
+                        }
+                    }
+                    batchHtml += `<div style="margin:2px 0;">
+                        🧪 <b>${b.batch_number}</b>: ${b.volume} ${b.volume_unit}
+                        ${b.expiry_date ? `<span style="${expClass}margin-left:6px;">效期: ${b.expiry_date}</span>` : ''}
+                        ${tags.length > 0 ? ' ' + tags.join(' ') : ''}
+                    </div>`;
+                });
+                batchHtml += '</div>';
+            } else {
+                batchHtml = '<div style="font-size:11px;color:#999;margin-top:2px;padding-left:10px;">（无批次信息）</div>';
+            }
+            return `
+                <div class="item-row">
+                    <div class="item-name">${r.name}</div>
+                    <div class="item-info">类型: ${r.type} | 总库存: ${r.volume} ${r.volume_unit}</div>
+                    ${batchHtml}
+                </div>
+            `;
+        }).join('');
     } catch (e) {
         console.error(e);
     }
@@ -487,10 +521,40 @@ async function showTaskDetail(taskId) {
             if (data.reagent_usage && data.reagent_usage.length > 0) {
                 html += '<div class="detail-section">';
                 html += '<h4>试剂使用 & 库存扣减</h4>';
+                const usageByReagent = {};
                 data.reagent_usage.forEach(r => {
-                    html += `<div class="info-row">`;
-                    html += `<span class="info-label">${r.reagent_name} (${r.source})</span>`;
-                    html += `<span class="info-value">${r.used_volume.toFixed(2)} ${r.used_volume_unit}</span>`;
+                    const key = `${r.reagent_name}|${r.source}`;
+                    if (!usageByReagent[key]) {
+                        usageByReagent[key] = {
+                            reagent_name: r.reagent_name,
+                            source: r.source,
+                            total_ul: 0,
+                            unit: r.used_volume_unit,
+                            batches: [],
+                        };
+                    }
+                    usageByReagent[key].total_ul += (r.used_volume || 0);
+                    if (r.batch_number || r.batch_id) {
+                        usageByReagent[key].batches.push({
+                            batch_number: r.batch_number,
+                            batch_id: r.batch_id,
+                            volume: r.used_volume,
+                            unit: r.used_volume_unit,
+                        });
+                    }
+                });
+                Object.values(usageByReagent).forEach(r => {
+                    html += `<div class="info-row" style="align-items:flex-start;">`;
+                    let labelHtml = `<span style="font-weight:500;">${r.reagent_name}</span> (${r.source})`;
+                    if (r.batches.length > 0) {
+                        labelHtml += '<div style="font-size:11px;color:#666;font-weight:normal;margin-top:2px;">';
+                        r.batches.forEach(b => {
+                            labelHtml += `<div>🧪 批次: <b>${b.batch_number || '(未命名)'}</b> - ${b.volume.toFixed(2)} ${b.unit}</div>`;
+                        });
+                        labelHtml += '</div>';
+                    }
+                    html += `<span class="info-label" style="line-height:1.5;">${labelHtml}</span>`;
+                    html += `<span class="info-value">${r.total_ul.toFixed(2)} ${r.unit}</span>`;
                     html += '</div>';
                 });
                 html += '</div>';

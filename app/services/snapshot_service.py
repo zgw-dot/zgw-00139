@@ -210,7 +210,7 @@ class SnapshotService:
             else:
                 ra, rb = reagents_a[name], reagents_b[name]
                 diff_fields = {}
-                for f in ['used_volume', 'used_volume_unit', 'source']:
+                for f in ['used_volume', 'used_volume_unit', 'source', 'batch_id', 'batch_number']:
                     if ra.get(f) != rb.get(f):
                         diff_fields[f] = {'old': ra.get(f), 'new': rb.get(f)}
                 if diff_fields:
@@ -307,10 +307,13 @@ class SnapshotService:
             self.db.execute('DELETE FROM task_reagent_usage WHERE task_id = ?', (task_id,))
             for r in snap_reagents:
                 self.db.execute('''
-                    INSERT INTO task_reagent_usage (task_id, reagent_id, reagent_name, used_volume, used_volume_unit, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO task_reagent_usage 
+                    (task_id, reagent_id, reagent_name, batch_id, batch_number,
+                     used_volume, used_volume_unit, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     task_id, r.get('reagent_id'), r.get('reagent_name'),
+                    r.get('batch_id'), r.get('batch_number'),
                     r.get('used_volume', 0), r.get('used_volume_unit', 'ul'),
                     r.get('source', '')
                 ))

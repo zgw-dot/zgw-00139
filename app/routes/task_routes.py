@@ -114,6 +114,24 @@ def reject_task(task_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
+@task_bp.route('/<int:task_id>/revoke_conflicts', methods=['GET'])
+def check_revoke_conflicts(task_id):
+    from app.database import get_db
+    from app.services.batch_service import BatchService
+    
+    db = get_db(current_app)
+    batch_service = BatchService(db)
+    
+    try:
+        conflicts = batch_service.check_revoke_conflicts(task_id)
+        return jsonify({
+            'has_conflicts': len(conflicts) > 0,
+            'conflicts': conflicts,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
 @task_bp.route('/<int:task_id>/revoke', methods=['POST'])
 def revoke_task(task_id):
     from app.database import get_db
@@ -124,12 +142,17 @@ def revoke_task(task_id):
     
     data = request.get_json() or {}
     operator = data.get('operator', 'user')
+    force = data.get('force', False)
     
     try:
-        result = service.revoke_approval(task_id, operator=operator)
+        result = service.revoke_approval(task_id, operator=operator, force=force)
         return jsonify({'success': result, 'message': '已撤销确认，库存已退回'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 400
+        error_msg = str(e)
+        status_code = 400
+        if '已被后续已批准的任务占用' in error_msg:
+            status_code = 409
+        return jsonify({'error': error_msg}), status_code
 
 @task_bp.route('/<int:task_id>/deviation', methods=['POST'])
 def add_deviation(task_id):

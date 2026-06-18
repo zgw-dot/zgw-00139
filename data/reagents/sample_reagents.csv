@@ -1,8 +1,10 @@
-name,type,concentration,concentration_unit,volume,volume_unit,min_pipette_volume,min_pipette_unit,description
-Taq_Polymerase,enzyme,5,U/uL,500,ul,0.5,ul,Taq DNA 聚合酶
-dNTP_Mix,dntp,10,mM,1000,ul,0.5,ul,dNTP 混合物
-PCR_Buffer,buffer,10,x,2000,ul,0.5,ul,10x PCR 缓冲液
-MgCl2,co-factor,25,mM,1000,ul,0.5,ul,氯化镁
-Master_Mix_2x,master_mix,2,x,5000,ul,0.5,ul,2x PCR Master Mix
-Nuclease_Free_Water,water,,ul,10000,ul,0.5,ul,无核酸酶水
-Positive_Control_DNA,control,10,ng/µL,100,ul,0.5,ul,阳性对照 DNA
+name,type,concentration,concentration_unit,volume,volume_unit,min_pipette_volume,min_pipette_unit,description,batch_number,expiry_date,frozen,min_usable_volume,min_usable_unit
+Taq_Polymerase,enzyme,5,U/uL,500,ul,0.5,ul,Taq DNA 聚合酶,TAQ-2025-001,2026-12-31,false,10,ul
+Taq_Polymerase,enzyme,5,U/uL,300,ul,0.5,ul,Taq DNA 聚合酶 旧批次,TAQ-2024-008,2025-06-30,false,10,ul
+dNTP_Mix,dntp,10,mM,1000,ul,0.5,ul,dNTP 混合物,DNTP-2025-A1,2027-03-15,false,20,ul
+PCR_Buffer,buffer,10,x,2000,ul,0.5,ul,10x PCR 缓冲液,BUF-2025-001,2026-09-30,false,50,ul
+MgCl2,co-factor,25,mM,1000,ul,0.5,ul,氯化镁,MG-2025-001,2028-01-01,false,20,ul
+Master_Mix_2x,master_mix,2,x,2500,ul,0.5,ul,2x PCR Master Mix,MM-2025-001,2025-08-31,false,50,ul
+Master_Mix_2x,master_mix,2,x,2500,ul,0.5,ul,2x PCR Master Mix 备用,MM-2025-002,2026-12-31,false,50,ul
+Nuclease_Free_Water,water,,ul,10000,ul,0.5,ul,无核酸酶水,WATER-2025-001,2030-01-01,false,100,ul
+Positive_Control_DNA,control,10,ng/µL,100,ul,0.5,ul,阳性对照 DNA,PC-2025-001,2026-06-30,false,5,ul

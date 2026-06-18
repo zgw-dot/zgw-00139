@@ -69,11 +69,27 @@ class ReportService:
                 'SELECT * FROM reagents WHERE id = ?', (usage['reagent_id'],)
             ).fetchone()
             if reagent:
+                batch_info = None
+                if usage.get('batch_id'):
+                    batch = self.db.execute(
+                        'SELECT * FROM reagent_batches WHERE id = ?', (usage['batch_id'],)
+                    ).fetchone()
+                    if batch:
+                        batch_info = {
+                            'batch_id': batch['id'],
+                            'batch_number': batch['batch_number'],
+                            'expiry_date': batch.get('expiry_date'),
+                            'is_frozen': bool(batch.get('is_frozen')),
+                            'remaining_volume': f"{batch['volume']} {batch['volume_unit']}",
+                        }
                 report['inventory_deduction']['reagents'].append({
                     'name': usage['reagent_name'],
                     'source': usage['source'],
                     'used_volume': f"{usage['used_volume']} {usage['used_volume_unit']}",
                     'remaining_volume': f"{reagent['volume']} {reagent['volume_unit']}",
+                    'batch_id': usage.get('batch_id'),
+                    'batch_number': usage.get('batch_number'),
+                    'batch': batch_info,
                 })
         
         for usage in primer_usage:
@@ -129,13 +145,22 @@ class ReportService:
         
         writer.writerow([])
         writer.writerow(['试剂库存扣减明细'])
-        writer.writerow(['试剂名称', '来源', '用量', '剩余库存'])
+        writer.writerow(['试剂名称', '批次号', '有效期', '来源', '用量', '批次剩余库存', '总剩余库存'])
         
         for item in report['inventory_deduction']['reagents']:
+            batch_number = item.get('batch_number') or ''
+            expiry = ''
+            batch_remaining = ''
+            if item.get('batch'):
+                expiry = item['batch'].get('expiry_date') or ''
+                batch_remaining = item['batch'].get('remaining_volume') or ''
             writer.writerow([
                 item['name'],
+                batch_number,
+                expiry,
                 item['source'],
                 item['used_volume'],
+                batch_remaining,
                 item['remaining_volume'],
             ])
         

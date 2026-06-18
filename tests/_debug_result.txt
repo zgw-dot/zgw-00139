@@ -1,0 +1,84 @@
+DB: C:\Users\13623\AppData\Local\Temp\pcr_debug_dwgv15xo\pcr_test.db
+Import: status=200, body={'errors': [], 'imported_batches': 3, 'imported_reagents': 3, 'total': 3}
+Tpl import: status=201
+Tpl type: <class 'dict'>, keys: ['cols', 'created_at', 'description', 'id', 'name', 'rows', 'wells']
+Tpl: {
+  "cols": 15,
+  "created_at": "2026-06-18 04:02:32",
+  "description": "",
+  "id": 1,
+  "name": "tpl.csv",
+  "rows": 2,
+  "wells": [
+    {
+      "id": 1,
+      "note": null,
+      "reagent_id": null,
+      "sample_id": null,
+      "sample_name": "1",
+      "template_id": 1,
+      "well_col": 1,
+      "well_row": 1,
+      "well_type": "sample"
+    },
+    {
+      "id": 2,
+      "note": null,
+      "reagent_id": null,
+      "sample_id": null,
+      "sample_name": "sample",
+      "template_id": 1,
+      "well_col": 2,
+      "well_row": 1,
+      "well_type": "sample"
+    },
+    {
+      "id": 3,
+      "note": null,
+      "reagent_id": null,
+      "sample_id": null,
+      "sample_name": "S1",
+      "template_id": 1,
+      "well_col": 3,
+      "well_row": 1,
+      "well_type": "sample"
+    },
+    {
+      "id": 4,
+      "note": null,
+      "reagent_id": null,
+      "sample_id": null,
+      "sample_name": "P1",
+      "template_id": 1,
+      "well_col": 4,
+      "well_row": 1,
+      "well_type":
+template_id = 1
+Creating task with data: {'name': 'DebugTask', 'template_id': 1, 'total_volume': 20, 'volume_unit': 'ul'}
+Create task: status=201, data=b'{"primer_usage":[],"reagent_usage":[],"task":{"created_at":"2026-06-18 04:02:32","deviation_note":null,"id":1,"name":"DebugTask","rejected_reason":null,"status":"draft","template_id":1,"total_volume":20.0,"updated_at":"2026-06-18 04:02:32","volume_unit":"ul"},"wells":[]}\n'
+Task type: <class 'dict'>, keys: ['primer_usage', 'reagent_usage', 'task', 'wells']
+Task: {
+  "primer_usage": [],
+  "reagent_usage": [],
+  "task": {
+    "created_at": "2026-06-18 04:02:32",
+    "deviation_note": null,
+    "id": 1,
+    "name": "DebugTask",
+    "rejected_reason": null,
+    "status": "draft",
+    "template_id": 1,
+    "total_volume": 20.0,
+    "updated_at": "2026-06-18 04:02:32",
+    "volume_unit": "ul"
+  },
+  "wells": []
+}
+task_id = None
+Generate: status=404
+Generate body (first 4000 chars): <!doctype html>
+<html lang=en>
+<title>404 Not Found</title>
+<h1>Not Found</h1>
+<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>
+
