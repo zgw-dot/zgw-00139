@@ -191,3 +191,178 @@ def save_history_export():
         return jsonify({'error': str(e), 'filters': filters}), 400
     except Exception as e:
         return jsonify({'error': f'保存失败: {str(e)}', 'filters': filters}), 500
+
+
+@history_bp.route('/presets', methods=['GET'])
+def list_filter_presets():
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    try:
+        presets = service.list_filter_presets()
+        return jsonify({
+            'presets': presets,
+            'count': len(presets),
+        })
+    except Exception as e:
+        return jsonify({'error': f'获取筛选方案列表失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets/default', methods=['GET'])
+def get_default_filter_preset():
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    try:
+        preset = service.get_default_filter_preset()
+        return jsonify({
+            'preset': preset,
+        })
+    except Exception as e:
+        return jsonify({'error': f'获取默认筛选方案失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets/<int:preset_id>', methods=['GET'])
+def get_filter_preset(preset_id):
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    try:
+        preset = service.get_filter_preset(preset_id)
+        if not preset:
+            return jsonify({'error': f'筛选方案 #{preset_id} 不存在'}), 404
+        return jsonify({
+            'preset': preset,
+        })
+    except Exception as e:
+        return jsonify({'error': f'获取筛选方案失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets', methods=['POST'])
+def create_filter_preset():
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    data = request.get_json() or {}
+    required_fields = ['name']
+    for field in required_fields:
+        if field not in data or not str(data[field]).strip():
+            return jsonify({'error': f'缺少必填字段: {field}'}), 400
+
+    try:
+        preset = service.save_filter_preset(
+            name=data.get('name'),
+            description=data.get('description'),
+            task_id=data.get('task_id'),
+            action_type=data.get('action_type'),
+            start_date=data.get('start_date'),
+            end_date=data.get('end_date'),
+            keyword=data.get('keyword'),
+            limit=data.get('limit', 100),
+            is_default=data.get('is_default', False),
+        )
+        return jsonify({
+            'preset': preset,
+            'message': f'筛选方案 "{preset["name"]}" 创建成功',
+        }), 201
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'创建筛选方案失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets/<int:preset_id>', methods=['PUT'])
+def update_filter_preset(preset_id):
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    data = request.get_json() or {}
+    required_fields = ['name']
+    for field in required_fields:
+        if field not in data or not str(data[field]).strip():
+            return jsonify({'error': f'缺少必填字段: {field}'}), 400
+
+    try:
+        preset = service.save_filter_preset(
+            name=data.get('name'),
+            description=data.get('description'),
+            task_id=data.get('task_id'),
+            action_type=data.get('action_type'),
+            start_date=data.get('start_date'),
+            end_date=data.get('end_date'),
+            keyword=data.get('keyword'),
+            limit=data.get('limit', 100),
+            is_default=data.get('is_default', False),
+            preset_id=preset_id,
+        )
+        return jsonify({
+            'preset': preset,
+            'message': f'筛选方案 "{preset["name"]}" 更新成功',
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'更新筛选方案失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets/<int:preset_id>/default', methods=['POST'])
+def set_default_filter_preset(preset_id):
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    try:
+        preset = service.set_default_filter_preset(preset_id)
+        return jsonify({
+            'preset': preset,
+            'message': f'已将 "{preset["name"]}" 设为默认筛选方案',
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'设置默认筛选方案失败: {str(e)}'}), 500
+
+
+@history_bp.route('/presets/<int:preset_id>', methods=['DELETE'])
+def delete_filter_preset(preset_id):
+    from app.database import get_db
+    from app.services.history_service import HistoryService
+
+    db = get_db(current_app)
+    service = HistoryService(db, current_app.config['DATA_DIR'])
+
+    try:
+        result = service.delete_filter_preset(preset_id)
+        message = '筛选方案删除成功'
+        if result.get('was_default'):
+            remaining = service.get_default_filter_preset()
+            if remaining:
+                message += f'，已自动将 "{remaining["name"]}" 设为新的默认方案'
+            else:
+                message += '，当前无默认筛选方案'
+        return jsonify({
+            'deleted': result['deleted'],
+            'was_default': result['was_default'],
+            'message': message,
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'删除筛选方案失败: {str(e)}'}), 500

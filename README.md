@@ -353,6 +353,126 @@ head -6 filtered_history.csv
 ⑤ 再次进入历史记录页 → 点刷新 → 查询接口正常返回，数据与重启前一致（SQLite 持久化）
 ```
 
+##### 📁 筛选方案预设（Filter Presets）—— 可复用、持久化、可导出
+
+将一套复杂的筛选条件（任务、操作类型、时间范围、关键词、条数限制）**命名保存**为方案，后续一键应用，无需重复配置。
+
+**核心特性：**
+| 特性 | 说明 |
+|------|------|
+| **💾 命名保存** | 给当前筛选条件起个名字和描述，保存为预设方案 |
+| **⭐ 设为默认** | 任意方案可设为默认，页面加载时自动应用 |
+| **🔄 切换应用** | 下拉选择任意已保存方案，一键填充所有筛选条件 |
+| **🗑️ 删除方案** | 不再需要的方案可删除；删除默认方案时自动降级到最早创建的方案 |
+| **🔒 冲突处理** | 同名方案创建/更新时自动拦截，提示明确错误 |
+| **📦 持久化** | 方案存储在 SQLite `history_filter_presets` 表，**刷新浏览器/重启服务均不丢失** |
+| **📜 审计记录** | 所有预设操作（创建/更新/删除/切换默认）均写入 `history` 表，可追溯 |
+
+**前端操作入口**（历史记录页筛选栏新增"筛选方案"行）：
+- 下拉选择框：列出所有已保存方案，选择即应用
+- 💾 保存：将当前筛选条件保存为新方案（弹窗输入名称、描述、是否设为默认）
+- ⭐ 设默认：将当前选中的方案设为默认
+- 🗑️ 删除：删除当前选中的方案
+- 🔄 刷新：重新加载方案列表
+
+**📤 导出增强**（JSON/CSV 导出均包含）：
+- `export_time`：导出时间戳
+- `filter_summary`：筛选条件摘要（如 `任务#1 | 操作类型:批准 | 条数上限:100`）
+- `matched_count`：符合条件的总记录数（不受 limit 影响）
+- `exported_count`：实际导出的记录数
+- `filters`：结构化的筛选参数对象
+- 空结果导出仍返回 **HTTP 200**，含完整元数据（`matched=0, exported=0`），不报错
+
+**🔌 筛选方案 API 端点**：
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/history/presets` | 获取所有方案列表 |
+| GET | `/api/history/presets/default` | 获取当前默认方案 |
+| GET | `/api/history/presets/<id>` | 获取单个方案详情 |
+| POST | `/api/history/presets` | 创建新方案（body: `{name, description?, task_id?, action_type?, start_date?, end_date?, keyword?, limit?, is_default?}`） |
+| PUT | `/api/history/presets/<id>` | 更新方案（body 字段同上） |
+| POST | `/api/history/presets/<id>/default` | 将该方案设为默认 |
+| DELETE | `/api/history/presets/<id>` | 删除方案；删除默认方案时自动降级 |
+
+**响应示例（创建成功）：**
+```json
+{
+  "message": "筛选方案 \"仅批准操作\" 创建成功",
+  "preset": {
+    "id": 1,
+    "name": "仅批准操作",
+    "description": "只查看任务批准相关记录",
+    "task_id": null,
+    "action_type": "task_approved",
+    "start_date": null,
+    "end_date": null,
+    "keyword": null,
+    "limit": 50,
+    "is_default": 0,
+    "created_at": "2025-06-18T10:00:00",
+    "updated_at": "2025-06-18T10:00:00"
+  }
+}
+```
+
+**错误处理：**
+- **400** 名称为空 / 名称已存在 / 非法日期格式 / 方案不存在
+- **404** 方案 ID 不存在
+- 所有错误均含中文 `error` 字段，提示明确
+
+**8️⃣ 验证筛选方案持久化（保存后重启仍在）**
+```
+① 启动服务，创建筛选方案：
+   curl -X POST http://localhost:5000/api/history/presets \
+     -H "Content-Type: application/json" \
+     -d '{"name":"持久化测试方案","action_type":"task_approved","limit":100,"is_default":true}'
+② 记下返回的 preset id，查询验证：
+   curl -s http://localhost:5000/api/history/presets/<id> | jq '.preset.name'
+③ 停掉服务（Ctrl+C）→ 重新启动 python run.py
+④ 再次查询同一 ID，验证方案仍存在且 is_default=1
+   curl -s http://localhost:5000/api/history/presets/<id> | jq '{name, is_default}'
+⑤ 验证默认方案接口：
+   curl -s http://localhost:5000/api/history/presets/default | jq '.preset.name'
+```
+
+**9️⃣ 验证按任务筛选后两种格式导出一致**
+```
+# 先按任务筛选查询
+curl -s "http://localhost:5000/api/history?task_id=1&limit=100" | jq '{total, count: .records | length}'
+
+# 导出 JSON
+curl -s "http://localhost:5000/api/history/export/json?task_id=1&limit=100" | jq '{matched_count, exported_count, filter_summary}'
+
+# 导出 CSV，检查首行注释
+curl -s "http://localhost:5000/api/history/export/csv?task_id=1&limit=100" | head -4
+# 应包含：导出时间、筛选条件摘要、匹配总数、导出条数
+```
+
+**1️⃣0️⃣ 验证同名方案冲突处理**
+```
+# 创建第一个方案
+curl -X POST http://localhost:5000/api/history/presets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"冲突测试","limit":50}'
+# 期望: HTTP 201
+
+# 同名再创建一次
+curl -X POST http://localhost:5000/api/history/presets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"冲突测试","limit":50}'
+# 期望: HTTP 400，body.error 包含 "已存在"
+```
+
+**1️⃣1️⃣ 验证导出记录可查（审计追踪）**
+```
+# 执行一次导出
+curl -s "http://localhost:5000/api/history/export/json?limit=5" > /dev/null
+
+# 查询导出审计记录
+curl -s "http://localhost:5000/api/history?action_type=history_exported_json&limit=5" | jq '{total, records: [.records[] | {detail, created_at}]}'
+# 应能看到刚才的导出记录，detail 包含筛选摘要和匹配/导出数
+```
+
 ### 验证命令
 
 运行完整测试套件（53 个测试用例）：

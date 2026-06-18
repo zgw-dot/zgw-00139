@@ -46,6 +46,9 @@ class HistoryService:
         'template_imported', 'template_exported_json', 'template_exported_csv',
         'template_copied', 'template_deleted', 'template_overwritten',
         'history_exported_json', 'history_exported_csv',
+        'history_exported_empty',
+        'filter_preset_created', 'filter_preset_updated',
+        'filter_preset_deleted', 'filter_preset_default_changed',
     ]
 
     ACTION_LABELS = {
@@ -86,6 +89,11 @@ class HistoryService:
         'template_overwritten': '覆盖模板',
         'history_exported_json': '导出历史 JSON',
         'history_exported_csv': '导出历史 CSV',
+        'history_exported_empty': '导出空结果',
+        'filter_preset_created': '创建筛选方案',
+        'filter_preset_updated': '更新筛选方案',
+        'filter_preset_deleted': '删除筛选方案',
+        'filter_preset_default_changed': '切换默认筛选方案',
     }
 
     def __init__(self, db, data_dir):
@@ -277,11 +285,12 @@ class HistoryService:
         history_records = result['records']
         inventory_logs = self.get_inventory_logs(limit=1000)
 
-        tasks_q = 'SELECT * FROM tasks ORDER BY created_at'
+        tasks_q = 'SELECT * FROM tasks'
         tasks_params = []
         if parsed.get('task_id'):
             tasks_q += ' WHERE id = ?'
             tasks_params.append(parsed['task_id'])
+        tasks_q += ' ORDER BY created_at'
         tasks = self.db.execute(tasks_q, tasks_params).fetchall()
 
         reagents = self.db.execute('SELECT * FROM reagents ORDER BY id').fetchall()
@@ -359,7 +368,10 @@ class HistoryService:
 
     def _log_export(self, export_type, parsed, count, total):
         try:
-            action_type_key = f'history_exported_{export_type}'
+            if total == 0:
+                action_type_key = 'history_exported_empty'
+            else:
+                action_type_key = f'history_exported_{export_type}'
             detail = (
                 f'导出历史记录 {export_type.upper()} | '
                 f'{self._filters_summary(parsed)} | '
@@ -368,6 +380,16 @@ class HistoryService:
             self.db.execute(
                 'INSERT INTO history (task_id, action, action_type, detail, operator) VALUES (?, ?, ?, ?, ?)',
                 (None, 'export', action_type_key, detail, 'system')
+            )
+            self.db.commit()
+        except Exception:
+            pass
+
+    def _log_filter_preset_action(self, action_type, detail, task_id=None):
+        try:
+            self.db.execute(
+                'INSERT INTO history (task_id, action, action_type, detail, operator) VALUES (?, ?, ?, ?, ?)',
+                (task_id, 'filter_preset', action_type, detail, 'system')
             )
             self.db.commit()
         except Exception:
@@ -456,3 +478,163 @@ class HistoryService:
             'SELECT id, name, status FROM tasks ORDER BY id DESC'
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def list_filter_presets(self):
+        rows = self.db.execute(
+            'SELECT * FROM history_filter_presets ORDER BY is_default DESC, name ASC'
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_filter_preset(self, preset_id):
+        row = self.db.execute(
+            'SELECT * FROM history_filter_presets WHERE id = ?',
+            (preset_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_default_filter_preset(self):
+        row = self.db.execute(
+            'SELECT * FROM history_filter_presets WHERE is_default = 1 LIMIT 1'
+        ).fetchone()
+        return dict(row) if row else None
+
+    def _validate_preset_name(self, name, exclude_id=None):
+        name = str(name).strip() if name else ''
+        if not name:
+            raise ValueError('方案名称不能为空')
+        if len(name) > 100:
+            raise ValueError('方案名称不能超过 100 个字符')
+        query = 'SELECT id FROM history_filter_presets WHERE name = ?'
+        params = [name]
+        if exclude_id is not None:
+            query += ' AND id != ?'
+            params.append(exclude_id)
+        existing = self.db.execute(query, params).fetchone()
+        if existing:
+            raise ValueError(f'方案名称 "{name}" 已存在，请使用其他名称')
+        return name
+
+    def save_filter_preset(self, name, description=None, task_id=None,
+                           action_type=None, start_date=None, end_date=None,
+                           keyword=None, limit=DEFAULT_LIMIT, is_default=False,
+                           preset_id=None):
+        name = self._validate_preset_name(name, exclude_id=preset_id)
+
+        parsed, errors, _ = self.validate_filters(
+            task_id=task_id, action_type=action_type,
+            start_date=start_date, end_date=end_date,
+            keyword=keyword, limit=limit,
+        )
+        if errors:
+            raise ValueError('筛选条件不合法: ' + '; '.join(errors))
+
+        if preset_id is not None:
+            existing = self.get_filter_preset(preset_id)
+            if not existing:
+                raise ValueError(f'筛选方案 #{preset_id} 不存在')
+
+            was_default = existing['is_default'] == 1
+            if is_default and not was_default:
+                self.db.execute(
+                    'UPDATE history_filter_presets SET is_default = 0 WHERE is_default = 1'
+                )
+            elif not is_default and was_default:
+                is_default = True
+
+            self.db.execute(
+                '''UPDATE history_filter_presets
+                   SET name = ?, description = ?, task_id = ?, action_type = ?,
+                       start_date = ?, end_date = ?, keyword = ?, "limit" = ?,
+                       is_default = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?''',
+                (name, description, parsed['task_id'], parsed['action_type'],
+                 parsed['start_date'].isoformat() if parsed['start_date'] else None,
+                 parsed['end_date'].isoformat() if parsed['end_date'] else None,
+                 parsed['keyword'], parsed['limit'], 1 if is_default else 0,
+                 preset_id)
+            )
+            self.db.commit()
+            updated_preset = self.get_filter_preset(preset_id)
+            self._log_filter_preset_action(
+                'filter_preset_updated',
+                f'更新筛选方案 "{name}" | {self._filters_summary(parsed)}' + (' | 设为默认' if is_default else '')
+            )
+            return updated_preset
+        else:
+            if is_default:
+                self.db.execute(
+                    'UPDATE history_filter_presets SET is_default = 0 WHERE is_default = 1'
+                )
+
+            cursor = self.db.execute(
+                '''INSERT INTO history_filter_presets
+                   (name, description, task_id, action_type, start_date,
+                    end_date, keyword, "limit", is_default)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (name, description, parsed['task_id'], parsed['action_type'],
+                 parsed['start_date'].isoformat() if parsed['start_date'] else None,
+                 parsed['end_date'].isoformat() if parsed['end_date'] else None,
+                 parsed['keyword'], parsed['limit'], 1 if is_default else 0)
+            )
+            self.db.commit()
+            new_preset = self.get_filter_preset(cursor.lastrowid)
+            self._log_filter_preset_action(
+                'filter_preset_created',
+                f'创建筛选方案 "{name}" | {self._filters_summary(parsed)}' + (' | 设为默认' if is_default else '')
+            )
+            return new_preset
+
+    def set_default_filter_preset(self, preset_id):
+        preset = self.get_filter_preset(preset_id)
+        if not preset:
+            raise ValueError(f'筛选方案 #{preset_id} 不存在')
+
+        old_default = self.get_default_filter_preset()
+        self.db.execute(
+            'UPDATE history_filter_presets SET is_default = 0 WHERE is_default = 1'
+        )
+        self.db.execute(
+            'UPDATE history_filter_presets SET is_default = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            (preset_id,)
+        )
+        self.db.commit()
+        updated_preset = self.get_filter_preset(preset_id)
+        old_name = old_default['name'] if old_default else '(无)'
+        self._log_filter_preset_action(
+            'filter_preset_default_changed',
+            f'默认筛选方案切换: "{old_name}" → "{preset["name"]}"'
+        )
+        return updated_preset
+
+    def delete_filter_preset(self, preset_id):
+        preset = self.get_filter_preset(preset_id)
+        if not preset:
+            raise ValueError(f'筛选方案 #{preset_id} 不存在')
+
+        was_default = preset['is_default'] == 1
+
+        self.db.execute(
+            'DELETE FROM history_filter_presets WHERE id = ?',
+            (preset_id,)
+        )
+        self.db.commit()
+
+        preset_name = preset['name']
+
+        if was_default:
+            remaining = self.db.execute(
+                'SELECT id FROM history_filter_presets ORDER BY created_at ASC LIMIT 1'
+            ).fetchone()
+            if remaining:
+                self.db.execute(
+                    'UPDATE history_filter_presets SET is_default = 1 WHERE id = ?',
+                    (remaining['id'],)
+                )
+                self.db.commit()
+
+        self._log_filter_preset_action(
+            'filter_preset_deleted',
+            f'删除筛选方案 "{preset_name}"' + (' | 原默认方案已删除' if was_default else '')
+        )
+
+        return {'deleted': True, 'was_default': was_default}

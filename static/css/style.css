@@ -502,6 +502,14 @@ header h1 {
     margin-bottom: 0;
 }
 
+.preset-row {
+    background: #f0f4ff;
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 5px;
+    border: 1px dashed #c5ceff;
+}
+
 .filter-field {
     display: flex;
     flex-direction: column;
@@ -808,6 +816,15 @@ header h1 {
 
 .toast.error {
     background: #dc3545;
+}
+
+.toast.warning {
+    background: #ffc107;
+    color: #333;
+}
+
+.toast.info {
+    background: #17a2b8;
 }
 
 @keyframes fadeIn {

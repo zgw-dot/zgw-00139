@@ -179,6 +179,20 @@
                             <div class="filter-actions">
                                 <button class="btn-primary" onclick="applyHistoryFilters()">🔍 应用筛选</button>
                                 <button onclick="resetHistoryFilters()">↺ 重置</button>
+                                <button onclick="showSavePresetModal()">💾 保存方案</button>
+                            </div>
+                        </div>
+                        <div class="filter-row preset-row">
+                            <div class="filter-field" style="flex: 1; min-width: 200px;">
+                                <label>筛选方案</label>
+                                <select id="history-filter-preset" onchange="applyPreset()">
+                                    <option value="">-- 选择已保存的方案 --</option>
+                                </select>
+                            </div>
+                            <div class="filter-actions" style="gap: 6px;">
+                                <button onclick="setCurrentPresetAsDefault()" title="设为默认方案">⭐ 设默认</button>
+                                <button onclick="deleteCurrentPreset()" title="删除当前方案">🗑️ 删除</button>
+                                <button onclick="loadFilterPresets()" title="刷新方案列表">🔄 刷新</button>
                             </div>
                         </div>
                     </div>

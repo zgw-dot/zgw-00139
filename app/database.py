@@ -210,6 +210,21 @@ def init_db(app):
             FOREIGN KEY (primer_id) REFERENCES primers(id),
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
+
+        CREATE TABLE IF NOT EXISTS history_filter_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            task_id INTEGER,
+            action_type TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            keyword TEXT,
+            "limit" INTEGER NOT NULL DEFAULT 100,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     
     # schema 迁移：补齐旧库缺少的列

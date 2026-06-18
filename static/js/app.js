@@ -35,7 +35,11 @@ document.addEventListener('DOMContentLoaded', function() {
     loadTasks();
     loadHistoryFilterOptions().then(() => {
         restoreHistoryFiltersFromStorage();
-        loadHistory();
+        loadFilterPresets().then(() => {
+            applyDefaultPresetOnLoad().then(() => {
+                loadHistory();
+            });
+        });
     });
 });
 
@@ -1529,6 +1533,239 @@ function exportHistoryCsv() {
     }).catch(e => {
         showToast('导出失败: ' + e.message, 'error');
     });
+}
+
+async function loadFilterPresets() {
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const presetSel = document.getElementById('history-filter-preset');
+        if (!presetSel) return;
+
+        const curVal = presetSel.value;
+        presetSel.innerHTML = '<option value="">-- 选择已保存的方案 --</option>';
+
+        if (data.presets && data.presets.length > 0) {
+            data.presets.forEach(p => {
+                const defaultMark = p.is_default ? ' ⭐' : '';
+                const desc = p.description ? ` - ${p.description}` : '';
+                presetSel.innerHTML += `<option value="${p.id}">${p.name}${defaultMark}${desc}</option>`;
+            });
+        }
+
+        if (curVal) {
+            presetSel.value = curVal;
+        }
+    } catch (e) {
+        console.warn('加载筛选方案列表失败', e);
+    }
+}
+
+async function applyPreset() {
+    const presetSel = document.getElementById('history-filter-preset');
+    const presetId = presetSel ? presetSel.value : '';
+    if (!presetId) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets/${presetId}`);
+        if (!resp.ok) {
+            const err = await resp.json();
+            showToast('加载方案失败: ' + (err.error || resp.statusText), 'error');
+            return;
+        }
+        const data = await resp.json();
+        const preset = data.preset;
+        if (!preset) return;
+
+        setHistoryFilters({
+            task_id: preset.task_id || '',
+            action_type: preset.action_type || '',
+            start_date: preset.start_date ? preset.start_date.substring(0, 10) : '',
+            end_date: preset.end_date ? preset.end_date.substring(0, 10) : '',
+            keyword: preset.keyword || '',
+            limit: preset.limit || '50',
+        });
+
+        saveHistoryFiltersToStorage();
+        loadHistory();
+        showToast(`已应用方案: ${preset.name}`, 'success');
+    } catch (e) {
+        showToast('应用方案失败: ' + e.message, 'error');
+    }
+}
+
+function showSavePresetModal() {
+    const modalBody = document.getElementById('modal-body');
+    const currentFilters = getHistoryFilters();
+
+    modalBody.innerHTML = `
+        <h3>💾 保存筛选方案</h3>
+        <div class="form-group">
+            <label>方案名称 *</label>
+            <input type="text" id="new-preset-name" placeholder="如：仅显示批准操作" maxlength="100">
+        </div>
+        <div class="form-group">
+            <label>方案描述（可选）</label>
+            <input type="text" id="new-preset-description" placeholder="简要说明筛选条件用途">
+        </div>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="new-preset-default">
+                设为默认方案
+            </label>
+        </div>
+        <div style="background:#f8f9fa;padding:10px;border-radius:6px;margin-bottom:16px;">
+            <div style="font-size:13px;color:#666;margin-bottom:4px;">当前筛选条件：</div>
+            <div style="font-size:12px;color:#333;word-break:break-all;">
+                ${buildFilterPreview(currentFilters)}
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="btn-cancel" onclick="closeModal()">取消</button>
+            <button class="btn-submit" onclick="saveCurrentFilterPreset()">保存</button>
+        </div>
+    `;
+    document.getElementById('modal').classList.remove('hidden');
+}
+
+function buildFilterPreview(filters) {
+    const parts = [];
+    if (filters.task_id) parts.push(`任务 #${filters.task_id}`);
+    if (filters.action_type) parts.push(`操作: ${filters.action_type}`);
+    if (filters.start_date) parts.push(`起始: ${filters.start_date}`);
+    if (filters.end_date) parts.push(`结束: ${filters.end_date}`);
+    if (filters.keyword) parts.push(`关键词: "${filters.keyword}"`);
+    parts.push(`上限: ${filters.limit} 条`);
+    return parts.join(' | ') || '无筛选条件（全部）';
+}
+
+async function saveCurrentFilterPreset() {
+    const name = document.getElementById('new-preset-name').value.trim();
+    const description = document.getElementById('new-preset-description').value.trim();
+    const is_default = document.getElementById('new-preset-default').checked;
+
+    if (!name) {
+        showToast('请输入方案名称', 'error');
+        return;
+    }
+
+    const filters = getHistoryFilters();
+    const payload = {
+        name: name,
+        description: description || null,
+        task_id: filters.task_id || null,
+        action_type: filters.action_type || null,
+        start_date: filters.start_date || null,
+        end_date: filters.end_date || null,
+        keyword: filters.keyword || null,
+        limit: filters.limit || 100,
+        is_default: is_default,
+    };
+
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast('保存失败: ' + (data.error || resp.statusText), 'error');
+            return;
+        }
+
+        showToast(`方案 "${data.preset.name}" 保存成功`, 'success');
+        closeModal();
+        loadFilterPresets();
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+async function setCurrentPresetAsDefault() {
+    const presetSel = document.getElementById('history-filter-preset');
+    const presetId = presetSel ? presetSel.value : '';
+    if (!presetId) {
+        showToast('请先选择一个筛选方案', 'warning');
+        return;
+    }
+
+    if (!confirm('确定要将此方案设为默认吗？')) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets/${presetId}/default`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast('设置失败: ' + (data.error || resp.statusText), 'error');
+            return;
+        }
+
+        showToast(data.message || '已设为默认方案', 'success');
+        loadFilterPresets();
+    } catch (e) {
+        showToast('设置失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteCurrentPreset() {
+    const presetSel = document.getElementById('history-filter-preset');
+    const presetId = presetSel ? presetSel.value : '';
+    if (!presetId) {
+        showToast('请先选择一个筛选方案', 'warning');
+        return;
+    }
+
+    if (!confirm('确定要删除此方案吗？此操作不可撤销。')) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets/${presetId}`, {
+            method: 'DELETE'
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast('删除失败: ' + (data.error || resp.statusText), 'error');
+            return;
+        }
+
+        showToast(data.message || '删除成功', 'success');
+        presetSel.value = '';
+        loadFilterPresets();
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+async function applyDefaultPresetOnLoad() {
+    try {
+        const resp = await fetch(`${API_BASE}/history/presets/default`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.preset) return;
+
+        const storageFilters = localStorage.getItem(HISTORY_FILTER_STORAGE_KEY);
+        if (storageFilters) return;
+
+        const preset = data.preset;
+        setHistoryFilters({
+            task_id: preset.task_id || '',
+            action_type: preset.action_type || '',
+            start_date: preset.start_date ? preset.start_date.substring(0, 10) : '',
+            end_date: preset.end_date ? preset.end_date.substring(0, 10) : '',
+            keyword: preset.keyword || '',
+            limit: preset.limit || '50',
+        });
+        saveHistoryFiltersToStorage();
+        showToast(`已加载默认方案: ${preset.name}`, 'info');
+    } catch (e) {
+        console.warn('加载默认方案失败', e);
+    }
 }
 
 async function quickSetup() {
